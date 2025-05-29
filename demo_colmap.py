@@ -51,6 +51,7 @@ def parse_args():
     parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
+    parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
     parser.add_argument("--query_frame_num", type=int, default=5, help="Number of frames to query")
     parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
     parser.add_argument(
@@ -86,7 +87,7 @@ def run_VGGT(model, images, dtype, resolution=518):
     depth_conf = depth_conf.squeeze(0).cpu().numpy()
     return extrinsic, intrinsic, depth_map, depth_conf
 
-
+@torch.inference_mode()
 def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
@@ -120,6 +121,9 @@ def demo_fn(args):
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
+    if args.total_frame_num is not None:
+        image_path_list = image_path_list[:args.total_frame_num]
+        base_image_path_list = base_image_path_list[:args.total_frame_num]
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
@@ -190,7 +194,7 @@ def demo_fn(args):
         reconstruction_resolution = img_load_resolution
     else:
         conf_thres_value = 5  # hard-coded to 5
-        max_points_for_colmap = 100000  # randomly sample 3D points
+        max_points_for_colmap = 200000  # randomly sample 3D points
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
