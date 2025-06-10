@@ -93,6 +93,76 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
 
     return images, original_coords
 
+def load_and_preprocess_images_ratio(image_path_list, target_size=1024):
+    """
+    Load and preprocess images by resizing to target size while maintaining aspect ratio.
+    Also returns the position information of original pixels after transformation.
+
+    Args:
+        image_path_list (list): List of paths to image files
+        target_size (int, optional): Target size for both width and height. Defaults to 1024.
+
+    Returns:
+        tuple: (
+            torch.Tensor: Batched tensor of preprocessed images with shape (N, 3, target_size, target_size),
+            torch.Tensor: Array of shape (N, 5) containing [x1, y1, x2, y2, width, height] for each image
+        )
+
+    Raises:
+        ValueError: If the input list is empty
+    """
+    # Check for empty list
+    if len(image_path_list) == 0:
+        raise ValueError("At least 1 image is required")
+
+    images = []
+    original_coords = []  # Renamed from position_info to be more descriptive
+    to_tensor = TF.ToTensor()
+
+    for image_path in image_path_list:
+        # Open image
+        img = Image.open(image_path)
+
+        # If there's an alpha channel, blend onto white background
+        if img.mode == "RGBA":
+            background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            img = Image.alpha_composite(background, img)
+
+        # Convert to RGB
+        img = img.convert("RGB")
+
+        # Get original dimensions
+        width, height = img.size
+
+        # Make the largest dimension 518px while maintaining aspect ratio
+        if width >= height:
+            new_width = target_size
+            new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+        else:
+            new_height = target_size
+            new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
+        
+        # Store original image coordinates and scale
+        original_coords.append(np.array([0, 0, new_width, new_height, width, height]))
+
+        # Resize to target size
+        img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+
+        # Convert to tensor
+        img_tensor = to_tensor(img)
+        images.append(img_tensor)
+
+    # Stack all images
+    images = torch.stack(images)
+    original_coords = torch.from_numpy(np.array(original_coords)).float()
+
+    # Add additional dimension if single image to ensure correct shape
+    if len(image_path_list) == 1:
+        if images.dim() == 3:
+            images = images.unsqueeze(0)
+            original_coords = original_coords.unsqueeze(0)
+
+    return images, original_coords
 
 def load_and_preprocess_images(image_path_list, mode="crop"):
     """

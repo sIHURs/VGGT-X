@@ -68,7 +68,8 @@ def run_VGGT(model, images, dtype, resolution=518):
 
     # hard-coded to use 518 for VGGT
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
-
+    images = images.to(next(model.parameters()).device)
+    
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None]  # add batch dimension
@@ -117,7 +118,7 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
@@ -131,7 +132,6 @@ def demo_fn(args):
     img_load_resolution = 1024
 
     images, original_coords = load_and_preprocess_images_square(image_path_list, img_load_resolution)
-    images = images.to(device)
     original_coords = original_coords.to(device)
     print(f"Loaded {len(images)} images from {image_dir}")
 
@@ -139,6 +139,7 @@ def demo_fn(args):
     # Run with 518x518 images
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+    images = images.to(device)
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
@@ -194,7 +195,7 @@ def demo_fn(args):
         reconstruction_resolution = img_load_resolution
     else:
         conf_thres_value = 5  # hard-coded to 5
-        max_points_for_colmap = 200000  # randomly sample 3D points
+        max_points_for_colmap = 100000  # randomly sample 3D points
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
@@ -211,7 +212,7 @@ def demo_fn(args):
         points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
 
         conf_mask = depth_conf >= conf_thres_value
-        # at most writing 100000 3d points to colmap reconstruction object
+        # at most writing max_points_for_colmap 3d points to colmap reconstruction object
         conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
 
         points_3d = points_3d[conf_mask]
