@@ -195,7 +195,7 @@ def demo_fn(args):
         reconstruction_resolution = img_load_resolution
     else:
         conf_thres_value = 5  # hard-coded to 5
-        max_points_for_colmap = 100000  # randomly sample 3D points
+        max_points_for_colmap = 100000 * (args.total_frame_num // 25)  # randomly sample 3D points
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
@@ -205,6 +205,17 @@ def demo_fn(args):
         points_rgb = F.interpolate(
             images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
         )
+        
+        if vggt_fixed_resolution != img_load_resolution:
+            for i in range(num_frames):
+                # automatically decide top left and bottom right corners of the image
+                height_sum = points_rgb[i].sum(dim=(0, 1))
+                width_sum = points_rgb[i].sum(dim=(0, 2))
+                original_coords[i, 0] = (height_sum > 0).nonzero(as_tuple=True)[0][0].item()
+                original_coords[i, 1] = (width_sum > 0).nonzero(as_tuple=True)[0][0].item()
+                original_coords[i, 2] = (height_sum > 0).nonzero(as_tuple=True)[0][-1].item()
+                original_coords[i, 3] = (width_sum > 0).nonzero(as_tuple=True)[0][-1].item()
+
         points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
         points_rgb = points_rgb.transpose(0, 2, 3, 1)
 
