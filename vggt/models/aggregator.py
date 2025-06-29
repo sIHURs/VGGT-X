@@ -177,7 +177,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, intermediate_layer_idx: list) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -228,6 +228,7 @@ class Aggregator(nn.Module):
 
         frame_idx = 0
         global_idx = 0
+        layer_idx = 0
         output_list = []
 
         for _ in range(self.aa_block_num):
@@ -246,7 +247,11 @@ class Aggregator(nn.Module):
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                output_list.append(concat_inter)
+                if layer_idx in intermediate_layer_idx:
+                    output_list.append(concat_inter)
+                else:
+                    output_list.append(None)
+                layer_idx += 1
 
         del concat_inter
         del frame_intermediates
