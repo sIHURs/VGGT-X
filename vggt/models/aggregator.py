@@ -177,11 +177,13 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor, intermediate_layer_idx: list) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, intermediate_layer_idx: list, chunk_size=128) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            intermediate_layer_idx (list): List of layer indices to return outputs from.
+            chunk_size (int): Size of the chunk to process at a time.
 
         Returns:
             (list[torch.Tensor], int):
@@ -197,11 +199,18 @@ class Aggregator(nn.Module):
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*S, C, H, W] for patch embedding
+        # Using chunk_size to avoid memory issues
         images = images.view(B * S, C_in, H, W)
-        patch_tokens = self.patch_embed(images)
-
-        if isinstance(patch_tokens, dict):
-            patch_tokens = patch_tokens["x_norm_patchtokens"]
+        patch_tokens_list = []
+        for i in range(0, B * S, chunk_size):
+            end = min(i + chunk_size, B * S)
+            patch_tokens_chunk = self.patch_embed(images[i:end])
+            if isinstance(patch_tokens_chunk, dict):
+                patch_tokens_chunk = patch_tokens_chunk["x_norm_patchtokens"]
+            patch_tokens_list.append(patch_tokens_chunk)
+        # Concatenate patch tokens from all chunks
+        patch_tokens = torch.cat(patch_tokens_list, dim=0)
+        del patch_tokens_list
 
         _, P, C = patch_tokens.shape
 
@@ -235,7 +244,7 @@ class Aggregator(nn.Module):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos
+                        tokens, B, S, P, C, frame_idx, pos=pos, chunk_size=chunk_size
                     )
                 elif attn_type == "global":
                     tokens, global_idx, global_intermediates = self._process_global_attention(
@@ -248,7 +257,7 @@ class Aggregator(nn.Module):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 if layer_idx in intermediate_layer_idx:
-                    output_list.append(concat_inter)
+                    output_list.append(concat_inter.cpu())
                 else:
                     output_list.append(None)
                 layer_idx += 1
@@ -258,7 +267,7 @@ class Aggregator(nn.Module):
         del global_intermediates
         return output_list, self.patch_start_idx
 
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, chunk_size=128):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
         """
@@ -273,7 +282,9 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            for i in range(0, B * S, chunk_size):
+                end = min(i + chunk_size, B * S)
+                tokens[i:end] = self.frame_blocks[frame_idx](tokens[i:end], pos=pos[i:end] if pos is not None else None)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
