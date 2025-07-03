@@ -5,9 +5,16 @@ get_available_gpu() {
   '
 }
 
+declare -a scenes=(
+    "data/MipNeRF360/bonsai"
+    "data/MipNeRF360/flowers"
+    "data/MipNeRF360/stump"
+)
+
 dir="data/MipNeRF360"
 
 for data_path in $dir/*; do
+# for data_path in "${scenes[@]}"; do
     while true; do
         gpu_id=$(get_available_gpu)
         if [[ -n $gpu_id ]]; then

@@ -136,7 +136,7 @@ if __name__ == "__main__":
     # add alignment
     camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
     camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-    c_cam, R_cam, t_cam = umeyama(camera_centers_gt.T, camera_centers_pred.T)
+    c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
 
     pcd_xyz_gt_list = []
     pcd_rgb_gt_list = []
@@ -173,6 +173,9 @@ if __name__ == "__main__":
 
         xys_gt_scaled[:, 0] = xys_gt[:, 0] / resize_ratio + original_coords[k, 0]
         xys_gt_scaled[:, 1] = xys_gt[:, 1] / resize_ratio + original_coords[k, 1]
+
+        xys_gt_scaled[:, 0] = np.clip(xys_gt_scaled[:, 0], 0, points_3d.shape[2] - 1)
+        xys_gt_scaled[:, 1] = np.clip(xys_gt_scaled[:, 1], 0, points_3d.shape[1] - 1)
         
         pcd_xyz_sampled = points_3d[k, xys_gt_scaled[:, 1].astype(int), xys_gt_scaled[:, 0].astype(int)]
         pcd_conf_sampled = depth_conf[k, xys_gt_scaled[:, 1].astype(int), xys_gt_scaled[:, 0].astype(int)]
@@ -185,21 +188,29 @@ if __name__ == "__main__":
         pcd_rgb_gt_list.append(pcd_rgb_gt[conf_mask])
         pcd_rgb_sampled_list.append(pcd_rgb_sampled[conf_mask])
 
-    c_pcd, R_pcd, t_pcd = umeyama(np.concatenate(pcd_xyz_gt_list, axis=0).T, np.concatenate(pcd_xyz_sampled_list, axis=0).T)
+    # c_pcd, R_pcd, t_pcd = umeyama(np.concatenate(pcd_xyz_gt_list, axis=0).T, np.concatenate(pcd_xyz_sampled_list, axis=0).T)
 
     pcd_xyz_gt_array = np.concatenate(pcd_xyz_gt_list, axis=0)
     pcd_xyz_sampled_array = np.concatenate(pcd_xyz_sampled_list, axis=0)
     pcd_rgb_gt_array = np.concatenate(pcd_rgb_gt_list, axis=0) / 255.0
     pcd_rgb_sampled_array = np.concatenate(pcd_rgb_sampled_list, axis=0) / 255.0
 
-    c, R, t, chamfer_distance, accuracy_mean, completeness_mean = best_sim3(
-        c_cam, R_cam, t_cam,
-        c_pcd, R_pcd, t_pcd,
-        pcd_xyz_gt_array, pcd_rgb_gt_array,
-        pcd_xyz_sampled_array, pcd_rgb_sampled_array
-    )
-
     pcd_xyz_gt_array = (c * (R @ pcd_xyz_gt_array.T) + t).T
+
+    pcd_src = o3d.geometry.PointCloud()
+    pcd_src.points = o3d.utility.Vector3dVector(pcd_xyz_gt_array)
+    pcd_src.colors = o3d.utility.Vector3dVector(pcd_rgb_gt_array)
+
+    pcd_tgt = o3d.geometry.PointCloud()
+    pcd_tgt.points = o3d.utility.Vector3dVector(pcd_xyz_sampled_array)
+    pcd_tgt.colors = o3d.utility.Vector3dVector(pcd_rgb_sampled_array)
+
+    completeness = pcd_src.compute_point_cloud_distance(pcd_tgt)
+    accuracy = pcd_tgt.compute_point_cloud_distance(pcd_src)
+
+    accuracy_mean = np.mean(accuracy)  # to be written to txt file
+    completeness_mean = np.mean(completeness)  # to be written to txt file
+    chamfer_distance = np.mean(np.concatenate([accuracy, completeness]))  # to be written to txt file
 
     ext_transform = np.eye(4)
     ext_transform[:3, :3] = R
@@ -244,10 +255,10 @@ if __name__ == "__main__":
         print(f"[INFO] Ground plane indices for camera centers: {ground_plane_indices_cam}")
 
         # Normalize the camera centers to [0, 1]
-        camera_centers_gt -= camera_centers_gt.min(axis=0, keepdims=True)
-        camera_centers_gt /= camera_centers_gt.max(axis=0, keepdims=True)
-        camera_centers_pred -= camera_centers_pred.min(axis=0, keepdims=True)
-        camera_centers_pred /= camera_centers_pred.max(axis=0, keepdims=True)
+        # camera_centers_gt -= camera_centers_gt.min(axis=0, keepdims=True)
+        # camera_centers_gt /= camera_centers_gt.max(axis=0, keepdims=True)
+        # camera_centers_pred -= camera_centers_pred.min(axis=0, keepdims=True)
+        # camera_centers_pred /= camera_centers_pred.max(axis=0, keepdims=True)
 
         plt.style.use("seaborn-v0_8-whitegrid")
         plt.figure()
@@ -265,10 +276,10 @@ if __name__ == "__main__":
         print(f"[INFO] Camera centers visualization saved to {os.path.join(args.data_path, 'camera_centers.png')}")
 
         # Visualize the point cloud
-        x_min = max(pcd_xyz_gt_array[:, 0].min(), pcd_xyz_sampled_array[:, 0].min())
-        x_max = min(pcd_xyz_gt_array[:, 0].max(), pcd_xyz_sampled_array[:, 0].max())
-        y_min = max(pcd_xyz_gt_array[:, 2].min(), pcd_xyz_sampled_array[:, 2].min())
-        y_max = min(pcd_xyz_gt_array[:, 2].max(), pcd_xyz_sampled_array[:, 2].max())
+        x_min = max(pcd_xyz_gt_array[:, ground_plane_indices_cam[0]].min(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[0]].min())
+        x_max = min(pcd_xyz_gt_array[:, ground_plane_indices_cam[0]].max(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[0]].max())
+        y_min = max(pcd_xyz_gt_array[:, ground_plane_indices_cam[1]].min(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[1]].min())
+        y_max = min(pcd_xyz_gt_array[:, ground_plane_indices_cam[1]].max(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[1]].max())
 
         # calculate the variance of x, y, z dimensions and decide which two are ground plane
         variance = np.var(pcd_xyz_gt_array, axis=0)
