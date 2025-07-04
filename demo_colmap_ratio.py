@@ -207,8 +207,8 @@ def demo_fn(args):
         pycolmap.bundle_adjustment(reconstruction, ba_options)
 
     else:
-        conf_thres_value = 5  # hard-coded to 5
-        max_points_for_colmap = 100000  # randomly sample 3D points
+        conf_thres_value = 1  # hard-coded to 1 for easier reconstruction
+        max_points_for_colmap = 200000  # randomly sample 3D points
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
@@ -256,7 +256,7 @@ def demo_fn(args):
     )
 
     # first create a folder named f"{args.scene_dir}_vggt", then soft link everything from args.scene_dir except for "sparse"
-    target_scene_dir = f"{args.scene_dir}_vggt"
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt", os.path.basename(args.scene_dir))
     os.makedirs(target_scene_dir, exist_ok=True)
     for item in os.listdir(args.scene_dir):
         if item != "sparse":
@@ -265,9 +265,9 @@ def demo_fn(args):
             if os.path.isdir(src):
                 os.makedirs(dst, exist_ok=True)
                 for file in os.listdir(src):
-                    os.symlink(os.path.join(src, file), os.path.join(dst, file))
+                    os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
             else:
-                os.symlink(src, dst)
+                os.symlink(os.path.abspath(src), os.path.abspath(dst))
 
     print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
     sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")

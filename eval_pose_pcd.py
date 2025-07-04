@@ -1,55 +1,24 @@
 import os
-import glob
-import random
-import cv2
 import open3d as o3d
 import numpy as np
-import networkx as nx
 import torch
 import argparse
-import torch.nn.functional as F
 import utils.colmap as colmap_utils
 
 from tqdm import tqdm
+from PIL import Image
+from copy import deepcopy
+from scipy.spatial.transform import Rotation
 from matplotlib import pyplot as plt
 
+from evo.core import lie_algebra
+from evo.core.trajectory import PoseTrajectory3D
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from utils.umeyama import umeyama
 from utils.metric_torch import camera_to_rel_deg, calculate_auc_np
-
-def best_sim3(c1, R1, t1, c2, R2, t2, pcd_xyz_gt_array, pcd_rgb_gt_array, 
-              pcd_xyz_sampled_array, pcd_rgb_sampled_array):
-    
-    pcd_xyz_gt_array_1 = (c1 * (R1 @ pcd_xyz_gt_array.T) + t1).T
-    pcd_xyz_gt_array_2 = (c2 * (R2 @ pcd_xyz_gt_array.T) + t2).T
-
-    pcd_src_1 = o3d.geometry.PointCloud()
-    pcd_src_1.points = o3d.utility.Vector3dVector(pcd_xyz_gt_array_1)
-    pcd_src_1.colors = o3d.utility.Vector3dVector(pcd_rgb_gt_array)
-
-    pcd_src_2 = o3d.geometry.PointCloud()
-    pcd_src_2.points = o3d.utility.Vector3dVector(pcd_xyz_gt_array_2)
-    pcd_src_2.colors = o3d.utility.Vector3dVector(pcd_rgb_gt_array)
-
-    pcd_tgt = o3d.geometry.PointCloud()
-    pcd_tgt.points = o3d.utility.Vector3dVector(pcd_xyz_sampled_array)
-    pcd_tgt.colors = o3d.utility.Vector3dVector(pcd_rgb_sampled_array)
-
-    completeness_1 = pcd_src_1.compute_point_cloud_distance(pcd_tgt)
-    accuracy_1 = pcd_tgt.compute_point_cloud_distance(pcd_src_1)
-    chamfer_distance_1 = np.mean(np.concatenate([accuracy_1, completeness_1]))  # to be written to txt file
-
-    completeness_2 = pcd_src_2.compute_point_cloud_distance(pcd_tgt)
-    accuracy_2 = pcd_tgt.compute_point_cloud_distance(pcd_src_2)
-    chamfer_distance_2 = np.mean(np.concatenate([accuracy_2, completeness_2]))  # to be written to txt file
-
-    if chamfer_distance_1 < chamfer_distance_2:
-        return c1, R1, t1, chamfer_distance_1, np.mean(accuracy_1), np.mean(completeness_1)
-    else:
-        return c2, R2, t2, chamfer_distance_2, np.mean(accuracy_2), np.mean(completeness_2)
 
 def run_VGGT(model, images, dtype, resolution=518):
     # images: [B, 3, H, W]
@@ -85,7 +54,7 @@ def run_VGGT(model, images, dtype, resolution=518):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VGGT evaluation on given scene")
     parser.add_argument("--data_path", type=str, required=True, help="Path to folder containing images and colmap results")
-    parser.add_argument("--conf_thresh", type=float, default=0.85, help="Confidence threshold for depth map")
+    parser.add_argument("--conf_thresh", type=float, default=1, help="Confidence threshold for depth map")
     parser.add_argument("--disable_vis", action="store_true", help="Disable visualization of camera centers")
 
     args = parser.parse_args()
@@ -125,18 +94,42 @@ if __name__ == "__main__":
     translation_gt = torch.tensor([image.tvec for image in images_gt_updated.values()], device=device)
     rotation_gt = torch.tensor([colmap_utils.qvec2rotmat(image.qvec) for image in images_gt_updated.values()], device=device)
 
+    # gt w2c
+    gt_extrinsics = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+    gt_extrinsics[:, :3, :3] = rotation_gt
+    gt_extrinsics[:, :3, 3] = translation_gt
+
+    # pred w2c
+    pred_extrinsics = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+    pred_extrinsics[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
+    pred_extrinsics[:, :3, 3] = torch.tensor(extrinsic[:, :3, 3], device=device)
+
+    poses_gt = np.linalg.inv(gt_extrinsics.cpu().numpy())  # gt c2w
+    poses_est = np.linalg.inv(pred_extrinsics.cpu().numpy())  # pred c2w
+    frame_ids = list(range(len(image_path_list)))
+
+    traj_ref = PoseTrajectory3D(
+        positions_xyz=poses_gt[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_gt[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=frame_ids)
+    traj_est = PoseTrajectory3D(
+        positions_xyz=poses_est[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_est[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=frame_ids)
+
+    alignment_transformation = lie_algebra.sim3(
+                *traj_ref.align(traj_est, correct_scale=True, correct_only_scale=False, n=-1))
+    # alignment_transformation = traj_ref.align_origin(traj_est) @ alignment_transformation
+
+    gt_extrinsics_aligned =torch.tensor(np.linalg.inv(np.array(traj_ref.poses_se3)), device=device)  # aligned gt w2c
+
     gt_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
-    gt_se3[:, :3, :3] = rotation_gt
-    gt_se3[:, 3, :3] = translation_gt
+    gt_se3[:, :3, :3] = gt_extrinsics_aligned[:, :3, :3]
+    gt_se3[:, 3, :3] = gt_extrinsics_aligned[:, :3, 3]
 
     pred_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
-    pred_se3[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
-    pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
-
-    # add alignment
-    camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-    camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-    c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
+    pred_se3[:, :3, :3] = pred_extrinsics[:, :3, :3]
+    pred_se3[:, 3, :3] = pred_extrinsics[:, :3, 3]
 
     pcd_xyz_gt_list = []
     pcd_rgb_gt_list = []
@@ -188,14 +181,12 @@ if __name__ == "__main__":
         pcd_rgb_gt_list.append(pcd_rgb_gt[conf_mask])
         pcd_rgb_sampled_list.append(pcd_rgb_sampled[conf_mask])
 
-    # c_pcd, R_pcd, t_pcd = umeyama(np.concatenate(pcd_xyz_gt_list, axis=0).T, np.concatenate(pcd_xyz_sampled_list, axis=0).T)
-
     pcd_xyz_gt_array = np.concatenate(pcd_xyz_gt_list, axis=0)
     pcd_xyz_sampled_array = np.concatenate(pcd_xyz_sampled_list, axis=0)
     pcd_rgb_gt_array = np.concatenate(pcd_rgb_gt_list, axis=0) / 255.0
     pcd_rgb_sampled_array = np.concatenate(pcd_rgb_sampled_list, axis=0) / 255.0
 
-    pcd_xyz_gt_array = (c * (R @ pcd_xyz_gt_array.T) + t).T
+    pcd_xyz_gt_array = (alignment_transformation[:3, :3] @ pcd_xyz_gt_array.T + alignment_transformation[:3, 3:]).T
 
     pcd_src = o3d.geometry.PointCloud()
     pcd_src.points = o3d.utility.Vector3dVector(pcd_xyz_gt_array)
@@ -212,22 +203,7 @@ if __name__ == "__main__":
     completeness_mean = np.mean(completeness)  # to be written to txt file
     chamfer_distance = np.mean(np.concatenate([accuracy, completeness]))  # to be written to txt file
 
-    ext_transform = np.eye(4)
-    ext_transform[:3, :3] = R
-    ext_transform[:3, 3:] = t
-    ext_transform = np.linalg.inv(ext_transform)
-
-    gt_aligned = np.zeros((extrinsic.shape[0], 4, 4))
-    gt_aligned[:, :3, :3] = gt_se3[:, :3, :3].cpu().numpy()
-    gt_aligned[:, :3, 3] = gt_se3[:, 3, :3].cpu().numpy() * c
-    gt_aligned[:, 3, 3] = 1.0
-    gt_aligned = np.einsum('bmn,bnk->bmk', gt_aligned, ext_transform[None])
-
-    gt_se3_aligned = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
-    gt_se3_aligned[:, :3, :3] = torch.tensor(gt_aligned[:, :3, :3], device=device)
-    gt_se3_aligned[:, 3, :3] = torch.tensor(gt_aligned[:, :3, 3], device=device)
-
-    rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(pred_se3, gt_se3_aligned, device, 4)
+    rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(pred_se3, gt_se3, device, 4)
     rError = rel_rangle_deg.cpu().numpy()  # to be written to txt file
     tError = rel_tangle_deg.cpu().numpy()  # to be written to txt file
     Auc_30 = calculate_auc_np(rError, tError, max_threshold=30)  # to be written to txt file
@@ -247,12 +223,12 @@ if __name__ == "__main__":
     if not args.disable_vis:
         # Visualize the camera centers
         print("[INFO] Visualizing camera centers")
-        camera_centers_gt = - (gt_se3_aligned[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3_aligned[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-        camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
+        camera_centers_gt = traj_ref.positions_xyz
+        camera_centers_pred = traj_est.positions_xyz
 
         variance_cam = np.var(camera_centers_gt, axis=0)
-        ground_plane_indices_cam = np.argsort(variance_cam)[1:]
-        print(f"[INFO] Ground plane indices for camera centers: {ground_plane_indices_cam}")
+        ground_plane_indices = np.argsort(variance_cam)[1:]
+        print(f"[INFO] Ground plane indices for camera centers: {ground_plane_indices}")
 
         # Normalize the camera centers to [0, 1]
         # camera_centers_gt -= camera_centers_gt.min(axis=0, keepdims=True)
@@ -262,10 +238,10 @@ if __name__ == "__main__":
 
         plt.style.use("seaborn-v0_8-whitegrid")
         plt.figure()
-        plt.scatter(camera_centers_gt[:, ground_plane_indices_cam[0]], 
-                    camera_centers_gt[:, ground_plane_indices_cam[1]], c='blue', label='Camera Centers GT')
-        plt.scatter(camera_centers_pred[:, ground_plane_indices_cam[0]], 
-                    camera_centers_pred[:, ground_plane_indices_cam[1]], c='red', label='Camera Centers Predicted')
+        plt.scatter(camera_centers_gt[:, ground_plane_indices[0]], 
+                    camera_centers_gt[:, ground_plane_indices[1]], c='blue', label='Camera Centers GT')
+        plt.scatter(camera_centers_pred[:, ground_plane_indices[0]], 
+                    camera_centers_pred[:, ground_plane_indices[1]], c='red', label='Camera Centers Predicted')
         plt.xlabel('X Coordinate')
         plt.ylabel('Y Coordinate')
         plt.legend()
@@ -276,15 +252,10 @@ if __name__ == "__main__":
         print(f"[INFO] Camera centers visualization saved to {os.path.join(args.data_path, 'camera_centers.png')}")
 
         # Visualize the point cloud
-        x_min = max(pcd_xyz_gt_array[:, ground_plane_indices_cam[0]].min(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[0]].min())
-        x_max = min(pcd_xyz_gt_array[:, ground_plane_indices_cam[0]].max(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[0]].max())
-        y_min = max(pcd_xyz_gt_array[:, ground_plane_indices_cam[1]].min(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[1]].min())
-        y_max = min(pcd_xyz_gt_array[:, ground_plane_indices_cam[1]].max(), pcd_xyz_sampled_array[:, ground_plane_indices_cam[1]].max())
-
-        # calculate the variance of x, y, z dimensions and decide which two are ground plane
-        variance = np.var(pcd_xyz_gt_array, axis=0)
-        ground_plane_indices = np.argsort(variance)[1:]
-        print(f"[INFO] Ground plane indices for point cloud: {ground_plane_indices}")
+        x_min = max(pcd_xyz_gt_array[:, ground_plane_indices[0]].min(), pcd_xyz_sampled_array[:, ground_plane_indices[0]].min())
+        x_max = min(pcd_xyz_gt_array[:, ground_plane_indices[0]].max(), pcd_xyz_sampled_array[:, ground_plane_indices[0]].max())
+        y_min = max(pcd_xyz_gt_array[:, ground_plane_indices[1]].min(), pcd_xyz_sampled_array[:, ground_plane_indices[1]].min())
+        y_max = min(pcd_xyz_gt_array[:, ground_plane_indices[1]].max(), pcd_xyz_sampled_array[:, ground_plane_indices[1]].max())
 
         plt.style.use("seaborn-v0_8-whitegrid")
         plt.figure(figsize=(10, 5))

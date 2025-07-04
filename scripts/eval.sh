@@ -30,3 +30,5 @@ for data_path in $dir/*; do
     done
 done
 wait
+
+python utils/gather_results.py $dir --format_float
