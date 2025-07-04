@@ -66,6 +66,7 @@ def run_VGGT(model, images, dtype, resolution=518):
     assert len(images.shape) == 4
     assert images.shape[1] == 3
 
+    device = next(model.parameters()).device
     # hard-coded to use 518 for VGGT
     height, width = images.shape[-2:]
     # Make the largest dimension 518px while maintaining aspect ratio
@@ -77,12 +78,16 @@ def run_VGGT(model, images, dtype, resolution=518):
         new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
     
     images = F.interpolate(images, size=(new_height, new_width), mode="bilinear", align_corners=False)
-    images = images.to(next(model.parameters()).device)
+    images = images.to(device)
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None]  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+            valid_layers = model.depth_head.intermediate_layer_idx
+            if valid_layers[-1] != model.aggregator.aa_block_num - 1:
+                valid_layers.append(model.aggregator.aa_block_num - 1)
+            aggregated_tokens_list, ps_idx = model.aggregator(images, valid_layers)
+            aggregated_tokens_list = [tokens.to(device) if tokens is not None else None for tokens in aggregated_tokens_list]
 
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
@@ -250,13 +255,27 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
-    print(f"Saving reconstruction to {args.scene_dir}/sparse")
-    sparse_reconstruction_dir = os.path.join(args.scene_dir, "sparse")
+    # first create a folder named f"{args.scene_dir}_vggt", then soft link everything from args.scene_dir except for "sparse"
+    target_scene_dir = f"{args.scene_dir}_vggt"
+    os.makedirs(target_scene_dir, exist_ok=True)
+    for item in os.listdir(args.scene_dir):
+        if item != "sparse":
+            src = os.path.join(args.scene_dir, item)
+            dst = os.path.join(target_scene_dir, item)
+            if os.path.isdir(src):
+                os.makedirs(dst, exist_ok=True)
+                for file in os.listdir(src):
+                    os.symlink(os.path.join(src, file), os.path.join(dst, file))
+            else:
+                os.symlink(src, dst)
+
+    print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
+    sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")
     os.makedirs(sparse_reconstruction_dir, exist_ok=True)
     reconstruction.write(sparse_reconstruction_dir)
 
     # Save point cloud for fast visualization
-    trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+    trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
     return True
 
