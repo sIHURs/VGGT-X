@@ -16,11 +16,11 @@ dir="data/MipNeRF360"
 rm -rf ${scene_dir}_vggt
 for scene_dir in $dir/*; do
 # for scene_dir in "${scenes[@]}"; do
-    while true; do
+    while [ -d "$scene_dir" ]; do
         gpu_id=$(get_available_gpu)
         if [[ -n $gpu_id ]]; then
             echo "GPU $gpu_id is available. Start running vggt on '$scene_dir'"
-            CUDA_VISIBLE_DEVICES=$gpu_id python demo_colmap_ratio.py --scene_dir $scene_dir &
+            CUDA_VISIBLE_DEVICES=$gpu_id python demo_colmap_ratio.py --scene_dir $scene_dir --save_depth_only &
             # Allow some time for the process to initialize and potentially use GPU memory
             sleep 60
             break

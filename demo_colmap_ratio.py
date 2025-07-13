@@ -22,7 +22,7 @@ from pathlib import Path
 import trimesh
 import pycolmap
 
-
+from tqdm import tqdm
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -44,6 +44,7 @@ def parse_args():
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
+    parser.add_argument("--save_depth_only", action="store_true", default=False, help="If only save depth")
     ######### BA parameters #########
     parser.add_argument(
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
@@ -107,6 +108,9 @@ def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
 
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt", os.path.basename(args.scene_dir))
+    os.makedirs(target_scene_dir, exist_ok=True)
+
     # Set seed for reproducibility
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -154,6 +158,21 @@ def demo_fn(args):
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
     images = images.to(device)
+
+    # save depth_map and depth_conf as .npy files
+    target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
+    target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
+    os.makedirs(target_depth_dir, exist_ok=True)
+    os.makedirs(target_conf_dir, exist_ok=True)
+    for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+        depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
+        depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
+        np.save(depth_map_path, depth_map[idx])
+        np.save(depth_conf_path, depth_conf[idx])
+    
+    print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
+    if args.save_depth_only:
+        return True
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
@@ -212,6 +231,11 @@ def demo_fn(args):
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
+        if os.path.join(args.scene_dir, "sparse/0/points3D.bin"):
+            import utils.colmap as colmap_utils
+            pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
+            max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
+
         image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
         num_frames, height, width, _ = points_3d.shape
 
@@ -256,8 +280,6 @@ def demo_fn(args):
     )
 
     # first create a folder named f"{args.scene_dir}_vggt", then soft link everything from args.scene_dir except for "sparse"
-    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt", os.path.basename(args.scene_dir))
-    os.makedirs(target_scene_dir, exist_ok=True)
     for item in os.listdir(args.scene_dir):
         if item != "sparse":
             src = os.path.join(args.scene_dir, item)
