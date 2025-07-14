@@ -165,10 +165,12 @@ def demo_fn(args):
     os.makedirs(target_depth_dir, exist_ok=True)
     os.makedirs(target_conf_dir, exist_ok=True)
     for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+        inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
+        normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
         depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
         depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
-        np.save(depth_map_path, depth_map[idx])
-        np.save(depth_conf_path, depth_conf[idx])
+        np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
+        np.save(depth_conf_path, depth_conf[idx].squeeze())
     
     print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
     if args.save_depth_only:
