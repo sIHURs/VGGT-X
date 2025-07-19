@@ -21,6 +21,7 @@ import argparse
 from pathlib import Path
 import trimesh
 import pycolmap
+import utils.colmap as colmap_utils
 
 from tqdm import tqdm
 from vggt.models.vggt import VGGT
@@ -57,6 +58,9 @@ def parse_args():
     parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
     parser.add_argument(
         "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
+    )
+    parser.add_argument(
+        "--overwrite_pcd", action="store_true", default=False, help="Use fine tracking (slower but more accurate)"
     )
     return parser.parse_args()
 
@@ -136,10 +140,19 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
-    if len(image_path_list) == 0:
-        raise ValueError(f"No images found in {image_dir}")
-    base_image_path_list = [os.path.basename(path) for path in image_path_list]
+
+    if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
+        print("Using order of ground truth images from COLMAP sparse reconstruction")
+        images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
+        images_gt_updated = {id: images_gt[id] for id in list(images_gt.keys())}
+        image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
+        base_image_path_list = [os.path.basename(path) for path in image_path_list]
+    else:
+        images_gt_updated = None
+        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
+        if len(image_path_list) == 0:
+            raise ValueError(f"No images found in {image_dir}")
+        base_image_path_list = [os.path.basename(path) for path in image_path_list]
     if args.total_frame_num is not None:
         image_path_list = image_path_list[:args.total_frame_num]
         base_image_path_list = base_image_path_list[:args.total_frame_num]
@@ -233,10 +246,41 @@ def demo_fn(args):
         shared_camera = False  # in the feedforward manner, we do not support shared camera
         camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
-        if os.path.join(args.scene_dir, "sparse/0/points3D.bin"):
-            import utils.colmap as colmap_utils
+        if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
             pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
             max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
+
+            if images_gt_updated is not None:
+                from utils.umeyama import umeyama
+
+                translation_gt = torch.tensor([image.tvec for image in images_gt_updated.values()], device=device)
+                rotation_gt = torch.tensor([colmap_utils.qvec2rotmat(image.qvec) for image in images_gt_updated.values()], device=device)
+
+                # gt w2c
+                gt_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+                gt_se3[:, :3, :3] = rotation_gt
+                gt_se3[:, 3, :3] = translation_gt
+
+                # pred w2c
+                pred_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+                pred_se3[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
+                pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
+
+                # add alignment
+                camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
+                camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
+                c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
+
+                # iterate pcd_gt dict and updates xyz of each point
+                for point_id, point in pcd_gt.items():
+                    point.xyz = (c * R @ point.xyz + t.squeeze())
+                
+                points_3d_gt = np.array([point.xyz for point in pcd_gt.values()])
+                points_rgb_gt = np.array([point.rgb for point in pcd_gt.values()])
+        else:
+            print("No ground truth points3D.bin found, using random sampling")
+            points_3d_gt = None
+            points_rgb_gt = None
 
         image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
         num_frames, height, width, _ = points_3d.shape
@@ -300,6 +344,12 @@ def demo_fn(args):
 
     # Save point cloud for fast visualization
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
+
+    if points_3d_gt is not None and points_rgb_gt is not None and args.overwrite_pcd:
+        # Save ground truth point cloud for comparison
+        print("Overwriting point cloud with ground truth points")
+        colmap_utils.write_points3D_binary(pcd_gt, os.path.join(sparse_reconstruction_dir, "points3D.bin"))
+        trimesh.PointCloud(points_3d_gt, colors=points_rgb_gt).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
     return True
 
