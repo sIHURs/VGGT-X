@@ -118,6 +118,19 @@ def load_and_preprocess_images_ratio(image_path_list, target_size=1024):
     original_coords = []  # Renamed from position_info to be more descriptive
     to_tensor = TF.ToTensor()
 
+    img = Image.open(image_path_list[0])
+
+    # Get original dimensions
+    width, height = img.size
+
+    # Make the largest dimension 518px while maintaining aspect ratio
+    if width >= height:
+        new_width = target_size
+        new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+    else:
+        new_height = target_size
+        new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
+
     for image_path in image_path_list:
         # Open image
         img = Image.open(image_path)
@@ -129,17 +142,6 @@ def load_and_preprocess_images_ratio(image_path_list, target_size=1024):
 
         # Convert to RGB
         img = img.convert("RGB")
-
-        # Get original dimensions
-        width, height = img.size
-
-        # Make the largest dimension 518px while maintaining aspect ratio
-        if width >= height:
-            new_width = target_size
-            new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
-        else:
-            new_height = target_size
-            new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
         
         # Store original image coordinates and scale
         original_coords.append(np.array([0, 0, new_width, new_height, width, height]))

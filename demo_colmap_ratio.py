@@ -248,7 +248,7 @@ def demo_fn(args):
 
         if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
             pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
-            max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
+            # max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
 
             if images_gt_updated is not None:
                 from utils.umeyama import umeyama
