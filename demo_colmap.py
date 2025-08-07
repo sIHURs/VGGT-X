@@ -9,6 +9,7 @@ import numpy as np
 import glob
 import os
 import copy
+import datetime
 import torch
 import torch.nn.functional as F
 
@@ -52,7 +53,7 @@ def parse_args():
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
-    parser.add_argument("--query_frame_num", type=int, default=5, help="Number of frames to query")
+    parser.add_argument("--query_frame_num", type=int, default=None, help="Number of frames to query")
     parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
     parser.add_argument(
         "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
@@ -66,14 +67,28 @@ def run_VGGT(model, images, dtype, resolution=518):
     assert len(images.shape) == 4
     assert images.shape[1] == 3
 
+    device = next(model.parameters()).device
     # hard-coded to use 518 for VGGT
-    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
-    images = images.to(next(model.parameters()).device)
+    height, width = images.shape[-2:]
+    # Make the largest dimension 518px while maintaining aspect ratio
+    if width >= height:
+        new_width = resolution
+        new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+    else:
+        new_height = resolution
+        new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
     
+    images = F.interpolate(images, size=(new_height, new_width), mode="bilinear", align_corners=False)
+    images = images.to(device)
+
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None]  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+            valid_layers = model.depth_head.intermediate_layer_idx
+            if valid_layers[-1] != model.aggregator.aa_block_num - 1:
+                valid_layers.append(model.aggregator.aa_block_num - 1)
+            aggregated_tokens_list, ps_idx = model.aggregator(images, valid_layers)
+            aggregated_tokens_list = [tokens.to(device) if tokens is not None else None for tokens in aggregated_tokens_list]
 
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
@@ -125,6 +140,11 @@ def demo_fn(args):
     if args.total_frame_num is not None:
         image_path_list = image_path_list[:args.total_frame_num]
         base_image_path_list = base_image_path_list[:args.total_frame_num]
+    else:
+        args.total_frame_num = len(image_path_list)
+    
+    if args.query_frame_num is None:
+        args.query_frame_num = args.total_frame_num // 2
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
@@ -146,6 +166,7 @@ def demo_fn(args):
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
+        start = datetime.datetime.now()
         with torch.cuda.amp.autocast(dtype=dtype):
             # Predicting Tracks
             # Using VGGSfM tracker instead of VGGT tracker for efficiency
@@ -167,6 +188,9 @@ def demo_fn(args):
 
             torch.cuda.empty_cache()
 
+        end = datetime.datetime.now()
+        print(f"Track prediction took {end - start} seconds")
+        
         # rescale the intrinsic matrix from 518 to 1024
         intrinsic[:, :2, :] *= scale
         track_mask = pred_vis_scores > args.vis_thresh
@@ -253,13 +277,26 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
-    print(f"Saving reconstruction to {args.scene_dir}/sparse")
-    sparse_reconstruction_dir = os.path.join(args.scene_dir, "sparse")
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt_full", os.path.basename(args.scene_dir))
+    os.makedirs(target_scene_dir, exist_ok=True)
+    for item in os.listdir(args.scene_dir):
+        if item != "sparse":
+            src = os.path.join(args.scene_dir, item)
+            dst = os.path.join(target_scene_dir, item)
+            if os.path.isdir(src):
+                os.makedirs(dst, exist_ok=True)
+                for file in os.listdir(src):
+                    os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
+            else:
+                os.symlink(os.path.abspath(src), os.path.abspath(dst))
+
+    print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
+    sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")
     os.makedirs(sparse_reconstruction_dir, exist_ok=True)
     reconstruction.write(sparse_reconstruction_dir)
 
     # Save point cloud for fast visualization
-    trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
+    trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
     return True
 

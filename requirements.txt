@@ -6,3 +6,4 @@ huggingface_hub
 einops
 safetensors
 evo
+roma

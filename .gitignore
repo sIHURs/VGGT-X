@@ -152,3 +152,5 @@ skyseg.onnx
 .vscode
 data
 cub-1.10.0
+notebooks/track_visuals*
+*.html
