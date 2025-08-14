@@ -12,15 +12,19 @@ declare -a scenes=(
 )
 
 dir="data/MipNeRF360"
+post_fix="_vggt_opt"
 
-rm -rf ${scene_dir}_vggt
 for scene_dir in $dir/*; do
 # for scene_dir in "${scenes[@]}"; do
     while [ -d "$scene_dir" ]; do
         gpu_id=$(get_available_gpu)
         if [[ -n $gpu_id ]]; then
             echo "GPU $gpu_id is available. Start running vggt on '$scene_dir'"
-            CUDA_VISIBLE_DEVICES=$gpu_id python demo_colmap_ratio_opt.py --scene_dir $scene_dir --use_opt --shared_camera &
+            CUDA_VISIBLE_DEVICES=$gpu_id python demo_colmap_ratio_opt.py \
+                --scene_dir $scene_dir \
+                --post_fix $post_fix \
+                --shared_camera \
+                --use_opt & \
             # Allow some time for the process to initialize and potentially use GPU memory
             sleep 60
             break
@@ -31,3 +35,6 @@ for scene_dir in $dir/*; do
     done
 done
 wait
+
+output_dir=${dir}_vggt_opt
+python utils/avg_metrics.py --output_dirs $dir$post_fix/* --save_path $dir$post_fix/vggt_results.txt

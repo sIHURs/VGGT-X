@@ -22,6 +22,7 @@ from pathlib import Path
 import trimesh
 import pycolmap
 import utils.colmap as colmap_utils
+from datetime import datetime
 from utils.umeyama import umeyama
 from utils.metric_torch import evaluate_auc, evaluate_pcd
 
@@ -45,13 +46,11 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--post_fix", type=str, required=True, help="post fix for the output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_opt", action="store_true", default=False, help="Use pose optimization for reconstruction")
     parser.add_argument("--save_depth_only", action="store_true", default=False, help="If only save depth")
     ######### BA parameters #########
-    parser.add_argument(
-        "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
-    )
     parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
@@ -97,7 +96,7 @@ def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
 
-    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt_opt", os.path.basename(args.scene_dir))
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}{args.post_fix}", os.path.basename(args.scene_dir))
     os.makedirs(target_scene_dir, exist_ok=True)
 
     # Set seed for reproducibility
@@ -150,6 +149,9 @@ def demo_fn(args):
     original_coords = original_coords.to(device)
     print(f"Loaded {len(images)} images from {image_dir}")
 
+    torch.cuda.reset_peak_memory_stats()
+    start_time = datetime.now()
+
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype)
@@ -164,6 +166,9 @@ def demo_fn(args):
         )
     
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    end_time = datetime.now()
+    max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
     # save depth_map and depth_conf as .npy files
     target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
@@ -233,6 +238,8 @@ def demo_fn(args):
                 f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']}\n")
                 f.write(f"Completeness Mean: {pcd_results['completeness_mean']}\n")
                 f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']}\n")
+                f.write(f"Inference Time: {(end_time - start_time).total_seconds()}\n")
+                f.write(f"Peak Memory Usage (MB): {max_memory}\n")
             
             points_3d_gt = np.array([point.xyz for point in pcd_gt.values()])
             points_rgb_gt = np.array([point.rgb for point in pcd_gt.values()])

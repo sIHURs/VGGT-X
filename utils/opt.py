@@ -22,6 +22,20 @@ def make_K_cam_depth(log_focals, pps, trans, quats, min_focals, max_focals, imsi
 
     return K, (w2cs, torch.linalg.inv(w2cs))
 
+def get_default_lr(epipolar_err, bound1=2.5, bound2=5.0):
+
+    assert bound2 > bound1, print("bound2 should be greater than bound1")
+
+    if epipolar_err > bound2:
+        lr_base = 1e-2
+    elif epipolar_err < bound1:
+        lr_base = 5e-4
+    else:
+        lr_base = 1e-3
+    lr_end = lr_base / 10
+
+    return lr_base, lr_end
+
 def cosine_schedule(alpha, lr_base, lr_end=0):
     lr = lr_end + (lr_base - lr_end) * (1 + np.cos(alpha * np.pi)) / 2
     return lr
@@ -198,6 +212,7 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
         "image_names_i": image_names_i_batched,
         "image_names_j": image_names_j_batched,
         "num_matches": num_matches,
+        "epipolar_err": err.median().item()
     }
 
     return output_dict
@@ -210,11 +225,14 @@ def pose_optimization(match_outputs,
                       depth_conf, 
                       base_image_path_list, 
                       device='cuda',
-                      lr_base=5e-4,
-                      lr_end=1e-5,
+                      lr_base=None,
+                      lr_end=None,
                       niter=300,
                       target_scene_dir=None,
                       shared_intrinsics=True):
+    
+    if lr_base is None or lr_end is None:
+        lr_base, lr_end = get_default_lr(match_outputs["epipolar_err"])
 
     with torch.no_grad():
         imsizes = torch.tensor(images.shape[-2:]).float()
