@@ -8,8 +8,184 @@ import random
 import numpy as np
 import torch
 import math
+import open3d as o3d
+from tqdm import tqdm
 from typing import Tuple
 
+@torch.inference_mode()
+def evaluate_pcd(
+        pcd_gt, 
+        points_3d, 
+        depth_conf,
+        images,
+        images_gt_updated, 
+        original_coords, 
+        vggt_fixed_resolution=518,
+        conf_thresh=1.0):
+    
+    pcd_xyz_gt_list = []
+    pcd_rgb_gt_list = []
+    pcd_xyz_sampled_list = []
+    pcd_rgb_sampled_list = []
+
+    for k, idx in tqdm(enumerate(list(images_gt_updated.keys())), desc="Evaluating Points..."):
+
+        point3D_ids_gt = images_gt_updated[idx].point3D_ids
+        mask_gt = (point3D_ids_gt >= 0) & (images_gt_updated[idx].xys[:, 0] >= 0) & (images_gt_updated[idx].xys[:, 1] >= 0) & \
+                    (images_gt_updated[idx].xys[:, 0] < original_coords[k, -2].item()) & (images_gt_updated[idx].xys[:, 1] < original_coords[k, -1].item())
+
+        xys_gt = images_gt_updated[idx].xys[mask_gt]
+        pcd_rgb_gt = np.stack([pcd_gt[id].rgb for id in point3D_ids_gt[mask_gt]], axis=0)
+        pcd_xyz_gt = np.stack([pcd_gt[id].xyz for id in point3D_ids_gt[mask_gt]], axis=0)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pcd_xyz_gt)
+        distances = np.array(pcd.compute_nearest_neighbor_distance())
+        avg_dist = np.mean(distances)
+        std_dev_dist = np.std(distances)
+
+        mask_distance = distances < avg_dist
+        xys_gt = xys_gt[mask_distance]
+        pcd_xyz_gt = pcd_xyz_gt[mask_distance]
+        pcd_rgb_gt = pcd_rgb_gt[mask_distance]
+
+        # transform xys_gt to the coordinate on points_3d, which is (N, H, W, 3)
+        xys_gt_scaled = np.zeros_like(xys_gt)
+        pcd_xyz_sampled = np.zeros_like(pcd_xyz_gt)
+        pcd_conf_sampled = np.zeros_like(pcd_rgb_gt[:, 0])  # Assuming confidence is a single channel
+        pcd_rgb_sampled = np.zeros_like(pcd_rgb_gt)
+        original_coords_arr = original_coords.cpu().numpy()
+        resize_ratio = (original_coords_arr[:, -2:].max() / vggt_fixed_resolution)
+
+        xys_gt_scaled[:, 0] = xys_gt[:, 0] / resize_ratio + original_coords_arr[k, 0]
+        xys_gt_scaled[:, 1] = xys_gt[:, 1] / resize_ratio + original_coords_arr[k, 1]
+
+        xys_gt_scaled[:, 0] = np.clip(xys_gt_scaled[:, 0], 0, points_3d.shape[2] - 1)
+        xys_gt_scaled[:, 1] = np.clip(xys_gt_scaled[:, 1], 0, points_3d.shape[1] - 1)
+        
+        pcd_xyz_sampled = points_3d[k, xys_gt_scaled[:, 1].astype(int), xys_gt_scaled[:, 0].astype(int)]
+        pcd_conf_sampled = depth_conf[k, xys_gt_scaled[:, 1].astype(int), xys_gt_scaled[:, 0].astype(int)]
+        pcd_rgb_sampled = images[k, :, xys_gt_scaled[:, 1].astype(int), xys_gt_scaled[:, 0].astype(int)].permute(1, 0).cpu().numpy() * 255
+
+        conf_mask = pcd_conf_sampled > conf_thresh
+
+        pcd_xyz_gt_list.append(pcd_xyz_gt[conf_mask])
+        pcd_xyz_sampled_list.append(pcd_xyz_sampled[conf_mask])
+        pcd_rgb_gt_list.append(pcd_rgb_gt[conf_mask])
+        pcd_rgb_sampled_list.append(pcd_rgb_sampled[conf_mask])
+
+    pcd_xyz_gt_array = np.concatenate(pcd_xyz_gt_list, axis=0)
+    pcd_xyz_sampled_array = np.concatenate(pcd_xyz_sampled_list, axis=0)
+    pcd_rgb_gt_array = np.concatenate(pcd_rgb_gt_list, axis=0) / 255.0
+    pcd_rgb_sampled_array = np.concatenate(pcd_rgb_sampled_list, axis=0) / 255.0
+
+    pcd_src = o3d.geometry.PointCloud()
+    pcd_src.points = o3d.utility.Vector3dVector(pcd_xyz_gt_array)
+    pcd_src.colors = o3d.utility.Vector3dVector(pcd_rgb_gt_array)
+
+    pcd_tgt = o3d.geometry.PointCloud()
+    pcd_tgt.points = o3d.utility.Vector3dVector(pcd_xyz_sampled_array)
+    pcd_tgt.colors = o3d.utility.Vector3dVector(pcd_rgb_sampled_array)
+
+    completeness = pcd_src.compute_point_cloud_distance(pcd_tgt)
+    accuracy = pcd_tgt.compute_point_cloud_distance(pcd_src)
+
+    accuracy_mean = np.mean(accuracy)  # to be written to txt file
+    completeness_mean = np.mean(completeness)  # to be written to txt file
+    chamfer_distance = np.mean(np.concatenate([accuracy, completeness]))  # to be written to txt file
+
+    print(f"    --  Accuracy Mean: {accuracy_mean:.4f}")
+    print(f"    --  Completeness Mean: {completeness_mean:.4f}")
+    print(f"    --  Chamfer Distance: {chamfer_distance:.4f}")
+
+    results = {
+        'accuracy_mean': accuracy_mean,
+        'completeness_mean': completeness_mean,
+        'chamfer_distance': chamfer_distance,
+    }
+
+    return results
+
+@torch.inference_mode()
+def evaluate_auc(pred_se3, gt_se3, device):
+
+    camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
+    camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
+    c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
+    camera_centers_gt_aligned = (c * (R @ camera_centers_gt.T) + t).T
+    print("    --  Umeyama Scale: ", c)
+    print("    --  Umeyama Rotation: \n", R)
+    print("    --  Umeyama Translation: \n", t)
+
+    ext_transform = np.eye(4)
+    ext_transform[:3, :3] = R
+    ext_transform[:3, 3:] = t
+    ext_transform = np.linalg.inv(ext_transform)
+
+    gt_aligned = np.zeros((gt_se3.shape[0], 4, 4))
+    gt_aligned[:, :3, :3] = gt_se3[:, :3, :3].cpu().numpy()
+    gt_aligned[:, :3, 3] = gt_se3[:, 3, :3].cpu().numpy() * c
+    gt_aligned[:, 3, 3] = 1.0
+    gt_aligned = np.einsum('bmn,bnk->bmk', gt_aligned, ext_transform[None])
+
+    gt_se3_aligned = torch.eye(4, device=device).unsqueeze(0).repeat(len(gt_se3), 1, 1)
+    gt_se3_aligned[:, :3, :3] = torch.tensor(gt_aligned[:, :3, :3], device=device)
+    gt_se3_aligned[:, 3, :3] = torch.tensor(gt_aligned[:, :3, 3], device=device)
+
+    rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(pred_se3, gt_se3_aligned, device, 4)
+    print(f"    --  Pair Rot   Error (Deg) of Vanilla: {rel_rangle_deg.mean():10.2f}")
+    print(f"    --  Pair Trans Error (Deg) of Vanilla: {rel_tangle_deg.mean():10.2f}")
+
+    rError = rel_rangle_deg.cpu().numpy()
+    tError = rel_tangle_deg.cpu().numpy()
+
+    Auc_30 = calculate_auc_np(rError, tError, max_threshold=30)
+    print(f"    --  AUC at 30: {Auc_30:.4f}")
+
+    results = {
+        'rel_rangle_deg': rel_rangle_deg.mean(),
+        'rel_tangle_deg': rel_tangle_deg.mean(),
+        'Auc_30': Auc_30,
+    }
+
+    return results
+
+def umeyama(X, Y):
+    """
+    Estimates the Sim(3) transformation between `X` and `Y` point sets.
+
+    Estimates c, R and t such as c * R @ X + t ~ Y.
+
+    Parameters
+    ----------
+    X : numpy.array
+        (m, n) shaped numpy array. m is the dimension of the points,
+        n is the number of points in the point set.
+    Y : numpy.array
+        (m, n) shaped numpy array. Indexes should be consistent with `X`.
+        That is, Y[:, i] must be the point corresponding to X[:, i].
+    
+    Returns
+    -------
+    c : float
+        Scale factor.
+    R : numpy.array
+        (3, 3) shaped rotation matrix.
+    t : numpy.array
+        (3, 1) shaped translation vector.
+    """
+    mu_x = X.mean(axis=1).reshape(-1, 1)
+    mu_y = Y.mean(axis=1).reshape(-1, 1)
+    var_x = np.square(X - mu_x).sum(axis=0).mean()
+    cov_xy = ((Y - mu_y) @ (X - mu_x).T) / X.shape[1]
+    U, D, VH = np.linalg.svd(cov_xy)
+    S = np.eye(X.shape[0])
+    if np.linalg.det(U) * np.linalg.det(VH) < 0:
+        S[-1, -1] = -1
+    c = np.trace(np.diag(D) @ S) / var_x
+    R = U @ S @ VH
+    t = mu_y - c * R @ mu_x
+    return c, R, t
 
 def camera_to_rel_deg(pred_se3, gt_se3, device, batch_size):
     """
