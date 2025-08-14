@@ -5,14 +5,18 @@ get_available_gpu() {
   '
 }
 
-declare -a scenes=(
-    "data/MipNeRF360/bonsai"
-    "data/MipNeRF360/flowers"
-    "data/MipNeRF360/stump"
-)
-
 dir="data/MipNeRF360"
-post_fix="_vggt_opt"
+post_fix="_vggt_opt_lr_5"
+
+declare -a scenes=(
+    "$dir$post_fix/bicycle"
+    "$dir$post_fix/bonsai"
+    "$dir$post_fix/counter"
+    "$dir$post_fix/garden"
+    "$dir$post_fix/kitchen"
+    "$dir$post_fix/room"
+    "$dir$post_fix/stump"
+)
 
 for scene_dir in $dir/*; do
 # for scene_dir in "${scenes[@]}"; do
@@ -38,3 +42,4 @@ wait
 
 output_dir=${dir}_vggt_opt
 python utils/avg_metrics.py --output_dirs $dir$post_fix/* --save_path $dir$post_fix/vggt_results.txt
+# python utils/avg_metrics.py --output_dirs $scenes --save_path $output_dir/vggt_results.txt
