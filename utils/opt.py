@@ -253,9 +253,9 @@ def pose_optimization(match_outputs,
             confs = depth_conf.mean(axis=(1, 2))
             weighting = torch.tensor(confs / confs.sum())
             pps = weighting @ pps
-            pps = pps.view(1, -1).repeat(len(qvec), 1)
+            pps = pps.view(1, -1)
             focal_m = weighting @ base_focals
-            log_focals = focal_m.view(1).log().repeat(len(qvec))
+            log_focals = focal_m.view(1).log()
         else:
             log_focals = base_focals.log()
         
@@ -314,16 +314,20 @@ def pose_optimization(match_outputs,
             qvec.requires_grad_(True), 
             tvec.requires_grad_(True), 
             log_sizes.requires_grad_(True),
+            log_focals.requires_grad_(True),
+            pps.requires_grad_(True)
         ],
-        "name": ["qvec", "tvec", "log_sizes"]
+        "name": ["qvec", "tvec", "log_sizes", "log_focals", "pps"],
     }]
 
     optimizer = torch.optim.Adam(params, lr=1, weight_decay=0, betas=(0.9, 0.9))
 
     loss_list = []
     for iter in tqdm(range(niter or 1), desc="Pose Optimization..."):
-        K, (w2cam, cam2w) = make_K_cam_depth(log_focals, pps, tvec, qvec, min_focals, max_focals, imsizes)
+
+        repeat_cnt = 1 if len(qvec) else shared_intrinsics
         
+        K, (w2cam, cam2w) = make_K_cam_depth(log_focals.repeat(repeat_cnt), pps.repeat(repeat_cnt, 1), tvec, qvec, min_focals, max_focals, imsizes)
         
         alpha = (iter / niter)
         lr = cosine_schedule(alpha, lr_base, lr_end)
