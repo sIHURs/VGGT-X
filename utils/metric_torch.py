@@ -107,12 +107,12 @@ def evaluate_pcd(
     return results
 
 @torch.inference_mode()
-def evaluate_auc(pred_se3, gt_se3, device):
+def evaluate_auc(pred_se3, gt_se3, device, return_aligned=False):
 
     camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
     camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-    c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
-    camera_centers_gt_aligned = (c * (R @ camera_centers_gt.T) + t).T
+    c, R, t = umeyama(camera_centers_pred.T, camera_centers_gt.T)
+    
     print("    --  Umeyama Scale: ", c)
     print("    --  Umeyama Rotation: \n", R)
     print("    --  Umeyama Translation: \n", t)
@@ -122,17 +122,17 @@ def evaluate_auc(pred_se3, gt_se3, device):
     ext_transform[:3, 3:] = t
     ext_transform = np.linalg.inv(ext_transform)
 
-    gt_aligned = np.zeros((gt_se3.shape[0], 4, 4))
-    gt_aligned[:, :3, :3] = gt_se3[:, :3, :3].cpu().numpy()
-    gt_aligned[:, :3, 3] = gt_se3[:, 3, :3].cpu().numpy() * c
-    gt_aligned[:, 3, 3] = 1.0
-    gt_aligned = np.einsum('bmn,bnk->bmk', gt_aligned, ext_transform[None])
+    pred_aligned = np.zeros((pred_se3.shape[0], 4, 4))
+    pred_aligned[:, :3, :3] = pred_se3[:, :3, :3].cpu().numpy()
+    pred_aligned[:, :3, 3] = pred_se3[:, 3, :3].cpu().numpy() * c
+    pred_aligned[:, 3, 3] = 1.0
+    pred_aligned = np.einsum('bmn,bnk->bmk', pred_aligned, ext_transform[None])
 
-    gt_se3_aligned = torch.eye(4, device=device).unsqueeze(0).repeat(len(gt_se3), 1, 1)
-    gt_se3_aligned[:, :3, :3] = torch.tensor(gt_aligned[:, :3, :3], device=device)
-    gt_se3_aligned[:, 3, :3] = torch.tensor(gt_aligned[:, :3, 3], device=device)
+    pred_se3_aligned = torch.eye(4, device=device).unsqueeze(0).repeat(len(pred_se3), 1, 1)
+    pred_se3_aligned[:, :3, :3] = torch.tensor(pred_aligned[:, :3, :3], device=device)
+    pred_se3_aligned[:, 3, :3] = torch.tensor(pred_aligned[:, :3, 3], device=device)
 
-    rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(pred_se3, gt_se3_aligned, device, 4)
+    rel_rangle_deg, rel_tangle_deg = camera_to_rel_deg(pred_se3_aligned, gt_se3, device, 4)
     print(f"    --  Pair Rot   Error (Deg) of Vanilla: {rel_rangle_deg.mean():10.2f}")
     print(f"    --  Pair Trans Error (Deg) of Vanilla: {rel_tangle_deg.mean():10.2f}")
 
@@ -148,8 +148,11 @@ def evaluate_auc(pred_se3, gt_se3, device):
         'Auc_30': Auc_30,
     }
 
-    return results
-
+    if return_aligned:
+        return results, pred_se3_aligned, c
+    else:
+        return results
+    
 def umeyama(X, Y):
     """
     Estimates the Sim(3) transformation between `X` and `Y` point sets.

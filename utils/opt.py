@@ -227,13 +227,17 @@ def pose_optimization(match_outputs,
                       device='cuda',
                       lr_base=None,
                       lr_end=None,
+                      lambda_3d=0.1,
+                      lambda_epi=1.0,
                       niter=300,
                       target_scene_dir=None,
                       shared_intrinsics=True):
     
+    torch.cuda.empty_cache()
+    
     if lr_base is None or lr_end is None:
         lr_base, lr_end = get_default_lr(match_outputs["epipolar_err"])
-
+    
     with torch.no_grad():
         imsizes = torch.tensor(images.shape[-2:]).float()
         diags = torch.norm(imsizes)
@@ -344,9 +348,8 @@ def pose_optimization(match_outputs,
         loss = 0.0
 
         sizes = log_sizes.exp()
-        global_scaling = 1 / sizes.min()
-        depths_i_scaled = depths_i * global_scaling * sizes[indexes_i, None]
-        depths_j_scaled = depths_j * global_scaling * sizes[indexes_j, None]
+        depths_i_scaled = depths_i * sizes[indexes_i, None] / sizes.min()
+        depths_j_scaled = depths_j * sizes[indexes_j, None] / sizes.min()
         
         cam_coords_i = torch.stack([
             (corr_points_i[..., 0] - Ks_i[:, None, 0, 2]) / Ks_i[:, None, 0, 0],
@@ -361,14 +364,15 @@ def pose_optimization(match_outputs,
         world_coords_i = (cam2w_i[:, :3, :3] @ cam_coords_i.permute(0, 2, 1)).permute(0, 2, 1) + cam2w_i[:, None, :3, 3]
         world_coords_j = (cam2w_j[:, :3, :3] @ cam_coords_j.permute(0, 2, 1)).permute(0, 2, 1) + cam2w_j[:, None, :3, 3]
         
-        loss = ((world_coords_i - world_coords_j).abs() * corr_weight_valid).mean() * 0.05
+        loss_3d = ((world_coords_i - world_coords_j).abs() * corr_weight_valid).mean() * lambda_3d
 
         P_i = Ks_i @ w2cam_i
         P_j = Ks_j @ w2cam_j
         Fm = kornia.geometry.epipolar.fundamental_from_projections(P_i[:, :3], P_j[:, :3])
         err = kornia.geometry.symmetrical_epipolar_distance(corr_points_i, corr_points_j, Fm, squared=False, eps=1e-08)
-        loss = loss + (err * corr_weight_valid.squeeze(-1)).mean() * 1.0
-        
+        loss_epi = (err * corr_weight_valid.squeeze(-1)).mean() * lambda_epi
+
+        loss = loss_3d + loss_epi
         loss_list.append(loss.item())
 
         loss.backward()

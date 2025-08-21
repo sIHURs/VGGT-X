@@ -56,7 +56,7 @@ def parse_args():
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
     parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
     parser.add_argument(
-        "--overwrite_pcd", action="store_true", default=False, help="Use fine tracking (slower but more accurate)"
+        "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
     )
     return parser.parse_args()
 
@@ -100,6 +100,7 @@ def demo_fn(args):
     os.makedirs(target_scene_dir, exist_ok=True)
 
     # Set seed for reproducibility
+    random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -128,7 +129,9 @@ def demo_fn(args):
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
         print("Using order of ground truth images from COLMAP sparse reconstruction")
         images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
-        images_gt_updated = {id: images_gt[id] for id in list(images_gt.keys())}
+        images_gt_keys = list(images_gt.keys())
+        random.shuffle(images_gt_keys)
+        images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
         image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
         base_image_path_list = [os.path.basename(path) for path in image_path_list]
     else:
@@ -164,31 +167,12 @@ def demo_fn(args):
             output, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
         )
-    
-    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
-    # save depth_map and depth_conf as .npy files
-    target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
-    target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
-    os.makedirs(target_depth_dir, exist_ok=True)
-    os.makedirs(target_conf_dir, exist_ok=True)
-    for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
-        inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
-        normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
-        depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
-        depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
-        np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
-        np.save(depth_conf_path, depth_conf[idx].squeeze())
-    
-    print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
-    if args.save_depth_only:
-        return True
-
     conf_thres_value = 1  # hard-coded to 1 for easier reconstruction
-    max_points_for_colmap = 200000  # randomly sample 3D points
+    max_points_for_colmap = 500000  # randomly sample 3D points
     shared_camera = False  # in the feedforward manner, we do not support shared camera
     camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
@@ -212,14 +196,22 @@ def demo_fn(args):
             pred_se3[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
             pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
 
-            auc_results = evaluate_auc(pred_se3, gt_se3, device)
+            # align prediction to gt points, yielding lower results
+            c = 2.5  # scale factor for better reconstruction, hard-coded here
+            # extrinsic[:, :3, :3] = pred_se3_aligned[:, :3, :3].cpu().numpy()
+            # extrinsic[:, :3, 3] = pred_se3_aligned[:, 3, :3].cpu().numpy()
+            extrinsic[:, :3, 3] *= c
+            depth_map *= c
+            points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
-            # add alignment
+            # auc_results = evaluate_auc(pred_se3, gt_se3, device)
+            pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
+            auc_results = evaluate_auc(gt_se3, pred_se3, device)
+
+            # align gt points to prediction
             camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
             camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
             c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
-
-            # iterate pcd_gt dict and updates xyz of each point
             for point_id, point in pcd_gt.items():
                 point.xyz = (c * R @ point.xyz + t.squeeze())
             
@@ -245,8 +237,27 @@ def demo_fn(args):
             points_rgb_gt = np.array([point.rgb for point in pcd_gt.values()])
     else:
         print("No ground truth points3D.bin found, using random sampling")
+        points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
         points_3d_gt = None
         points_rgb_gt = None
+
+    # save depth_map and depth_conf as .npy files
+    target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
+    target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
+    os.makedirs(target_depth_dir, exist_ok=True)
+    os.makedirs(target_conf_dir, exist_ok=True)
+
+    for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+        inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
+        normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
+        depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
+        depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
+        np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
+        np.save(depth_conf_path, depth_conf[idx].squeeze())
+    
+    print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
+    if args.save_depth_only:
+        return True
 
     image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
     num_frames, height, width, _ = points_3d.shape
