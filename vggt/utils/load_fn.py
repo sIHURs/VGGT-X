@@ -92,7 +92,7 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
 
     return images, original_coords
 
-def load_and_preprocess_images_ratio(image_path_list, target_size=1024):
+def load_and_preprocess_images_ratio(image_path_list, target_size=None):
     """
     Load and preprocess images by resizing to target size while maintaining aspect ratio.
     Also returns the position information of original pixels after transformation.
@@ -124,12 +124,16 @@ def load_and_preprocess_images_ratio(image_path_list, target_size=1024):
     width, height = img.size
 
     # Make the largest dimension 518px while maintaining aspect ratio
-    if width >= height:
-        new_width = target_size
-        new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+    if target_size is not None:
+        if width >= height:
+            new_width = target_size
+            new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
+        else:
+            new_height = target_size
+            new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
     else:
-        new_height = target_size
-        new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
+        new_width = width
+        new_height = height
 
     for image_path in image_path_list:
         # Open image
