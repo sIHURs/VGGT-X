@@ -239,7 +239,7 @@ def pose_optimization(match_outputs,
         lr_base, lr_end = get_default_lr(match_outputs["epipolar_err"])
     
     with torch.no_grad():
-        imsizes = torch.tensor(images.shape[-2:]).float()
+        imsizes = torch.tensor([images.shape[-1], images.shape[-2]]).float()
         diags = torch.norm(imsizes)
         min_focals = 0.25 * diags  # diag = 1.2~1.4*max(W,H) => beta >= 1/(2*1.2*tan(fov/2)) ~= 0.26
         max_focals = 10 * diags
@@ -319,9 +319,9 @@ def pose_optimization(match_outputs,
             tvec.requires_grad_(True), 
             log_sizes.requires_grad_(True),
             log_focals.requires_grad_(True),
-            pps.requires_grad_(True)
+            # pps.requires_grad_(True)
         ],
-        "name": ["qvec", "tvec", "log_sizes", "log_focals", "pps"],
+        "name": ["qvec", "tvec", "log_sizes", "log_focals"],
     }]
 
     optimizer = torch.optim.Adam(params, lr=1, weight_decay=0, betas=(0.9, 0.9))

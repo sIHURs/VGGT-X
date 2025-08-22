@@ -167,6 +167,10 @@ def demo_fn(args):
             output, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
         )
+        output["original_width"] = images.shape[-1]
+        output["original_height"] = images.shape[-2]
+        torch.save(output, os.path.join(target_scene_dir, "matches.pt"))
+        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
 
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
