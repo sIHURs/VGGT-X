@@ -319,9 +319,9 @@ def pose_optimization(match_outputs,
             tvec.requires_grad_(True), 
             log_sizes.requires_grad_(True),
             log_focals.requires_grad_(True),
-            # pps.requires_grad_(True)
+            pps.requires_grad_(True)
         ],
-        "name": ["qvec", "tvec", "log_sizes", "log_focals"],
+        "name": ["qvec", "tvec", "log_sizes", "log_focals", "pps"],
     }]
 
     optimizer = torch.optim.Adam(params, lr=1, weight_decay=0, betas=(0.9, 0.9))
