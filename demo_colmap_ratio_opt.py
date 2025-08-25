@@ -283,13 +283,16 @@ def demo_fn(args):
     points_xyf = points_xyf[conf_mask]
     points_rgb = points_rgb[conf_mask]
 
+    inverse_idx = [images_gt_keys.index(key) for key in list(images_gt.keys())]
+    base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
+
     print("Converting to COLMAP format")
     reconstruction = batch_np_matrix_to_pycolmap_wo_track(
         points_3d,
         points_xyf,
         points_rgb,
-        extrinsic,
-        intrinsic,
+        extrinsic[inverse_idx],
+        intrinsic[inverse_idx],
         image_size,
         shared_camera=shared_camera,
         camera_type=camera_type,
@@ -299,8 +302,8 @@ def demo_fn(args):
 
     reconstruction = colmap_utils.rename_colmap_recons_and_rescale_camera(
         reconstruction,
-        base_image_path_list,
-        original_coords.cpu().numpy(),
+        base_image_path_list_inv,
+        original_coords.cpu().numpy()[inverse_idx],
         img_size=reconstruction_resolution,
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
