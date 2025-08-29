@@ -352,18 +352,18 @@ def pose_optimization(match_outputs,
         depths_j_scaled = depths_j * sizes[indexes_j, None] / sizes.min()
         
         cam_coords_i = torch.stack([
-            (corr_points_i[..., 0] - Ks_i[:, None, 0, 2]) / Ks_i[:, None, 0, 0],
-            (corr_points_i[..., 1] - Ks_i[:, None, 1, 2]) / Ks_i[:, None, 1, 1],
+            (corr_points_i[..., 0] - Ks_i[:, None, 0, 2]) / Ks_i[:, None, 0, 0] * depths_i_scaled,
+            (corr_points_i[..., 1] - Ks_i[:, None, 1, 2]) / Ks_i[:, None, 1, 1] * depths_i_scaled,
             depths_i_scaled
         ], dim=-1)
         cam_coords_j = torch.stack([
-            (corr_points_j[..., 0] - Ks_j[:, None, 0, 2]) / Ks_j[:, None, 0, 0],
-            (corr_points_j[..., 1] - Ks_j[:, None, 1, 2]) / Ks_j[:, None, 1, 1],
+            (corr_points_j[..., 0] - Ks_j[:, None, 0, 2]) / Ks_j[:, None, 0, 0] * depths_j_scaled,
+            (corr_points_j[..., 1] - Ks_j[:, None, 1, 2]) / Ks_j[:, None, 1, 1] * depths_j_scaled,
             depths_j_scaled
         ], dim=-1)
-        world_coords_i = (cam2w_i[:, :3, :3] @ cam_coords_i.permute(0, 2, 1)).permute(0, 2, 1) + cam2w_i[:, None, :3, 3]
-        world_coords_j = (cam2w_j[:, :3, :3] @ cam_coords_j.permute(0, 2, 1)).permute(0, 2, 1) + cam2w_j[:, None, :3, 3]
-        
+        world_coords_i = (cam_coords_i @ cam2w_i[:, :3, :3].permute(0, 2, 1)) + cam2w_i[:, None, :3, 3]
+        world_coords_j = (cam_coords_j @ cam2w_j[:, :3, :3].permute(0, 2, 1)) + cam2w_j[:, None, :3, 3]
+
         loss_3d = ((world_coords_i - world_coords_j).abs() * corr_weight_valid).mean() * lambda_3d
 
         P_i = Ks_i @ w2cam_i
