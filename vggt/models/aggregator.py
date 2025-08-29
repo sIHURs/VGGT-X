@@ -202,11 +202,14 @@ class Aggregator(nn.Module):
         # Using chunk_size to avoid memory issues
         images = images.view(B * S, C_in, H, W)
         patch_tokens_list = []
+        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         for i in range(0, B * S, chunk_size):
             end = min(i + chunk_size, B * S)
             patch_tokens_chunk = self.patch_embed(images[i:end])
             if isinstance(patch_tokens_chunk, dict):
-                patch_tokens_chunk = patch_tokens_chunk["x_norm_patchtokens"]
+                patch_tokens_chunk = patch_tokens_chunk["x_norm_patchtokens"].to(dtype)
+            else:
+                patch_tokens = patch_tokens.to(dtype)
             patch_tokens_list.append(patch_tokens_chunk)
         # Concatenate patch tokens from all chunks
         patch_tokens = torch.cat(patch_tokens_list, dim=0)
