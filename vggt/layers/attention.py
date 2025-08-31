@@ -11,11 +11,32 @@ import logging
 import os
 import warnings
 
+import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
 
 XFORMERS_AVAILABLE = False
+
+
+@torch.compile
+def infer_layer_norm(x, w, b, dims, eps):
+    x -= x.mean(dims, True)
+    x /= torch.sqrt((x**2).mean(dims, True) + eps)
+    x *= w
+    x += b
+
+def infer_norm(norm_layer, x):
+    # torch.cuda.empty_cache()
+    if isinstance(norm_layer, nn.LayerNorm):
+        assert norm_layer.elementwise_affine == True
+        w = norm_layer.weight
+        b = norm_layer.bias
+        dims = [i for i in range(len(x.shape)-len(w.shape), len(x.shape))]
+        infer_layer_norm(x, w, b, dims, norm_layer.eps)
+        # torch.cuda.empty_cache()
+        return x
+    return norm_layer(x)
 
 
 class Attention(nn.Module):
@@ -47,28 +68,47 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
 
+        self.training = False
+        self.q_norm.training = False
+        self.k_norm.training = False
+
     def forward(self, x: Tensor, pos=None) -> Tensor:
         B, N, C = x.shape
+
+        # TODO: avoid doubled memory by splitting self.qkv into three separate MLP
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        del qkv
+
+        # TODO: nn.LayerNorm seems to be doing weird stuff and increases VRAM usage even after return
+        # maybe hard code running mean/std, and possibly bake them into self.qkv weights?
+        # torch.cuda.empty_cache()
+        # q = self.q_norm(q).to(q.dtype); torch.cuda.empty_cache()
+        # k = self.k_norm(k).to(k.dtype); torch.cuda.empty_cache()
+        infer_norm(self.q_norm, q)
+        infer_norm(self.k_norm, k)
 
         if self.rope is not None:
-            q = self.rope(q, pos)
-            k = self.rope(k, pos)
+            q = self.rope(q, pos).to(q.dtype)
+            k = self.rope(k, pos).to(q.dtype)
+            # torch.cuda.empty_cache()
 
+        assert self.fused_attn
         if self.fused_attn:
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
             attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
+            # attn = self.attn_drop(attn)
             x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
-        x = self.proj_drop(x)
+        # x = self.proj_drop(x)
         return x
 
 

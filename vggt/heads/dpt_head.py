@@ -14,6 +14,7 @@ from typing import List, Dict, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from vggt.layers import MlpFP32
 from .head_act import activate_head
 from .utils import create_uv_grid, position_grid_to_embed
 
@@ -56,6 +57,7 @@ class DPTHead(nn.Module):
     ) -> None:
         super(DPTHead, self).__init__()
         self.patch_size = patch_size
+        self.output_dim = output_dim
         self.activation = activation
         self.conf_activation = conf_activation
         self.pos_embed = pos_embed
@@ -112,9 +114,26 @@ class DPTHead(nn.Module):
                 nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
             )
 
+    def to(self, *args, **kwargs):
+        self.norm = self.norm.to(*args, **kwargs)
+        self.projects = self.projects.to(*args, **kwargs)
+        self.resize_layers = self.resize_layers.to(*args, **kwargs)
+        for key in ('layer1_rn', 'layer2_rn', 'layer3_rn', 'layer4_rn',
+                    'refinenet1', 'refinenet2', 'refinenet3', 'refinenet4',
+                    'output_conv1'):
+            if not hasattr(self.scratch, key):
+                continue
+            setattr(self.scratch, key, getattr(self.scratch, key).to(*args, **kwargs))
+
+        # keep output_conv2 in FP32
+        args, kwargs = MlpFP32.map_to_args_to_float(args, kwargs)
+        self.scratch.output_conv2 = self.scratch.output_conv2.to(*args, **kwargs)
+
+        return self
+
     def forward(
         self,
-        aggregated_tokens_list: List[torch.Tensor],
+        aggregated_tokens_list: Dict[int, torch.Tensor],
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
@@ -122,7 +141,7 @@ class DPTHead(nn.Module):
         """
         Forward pass through the DPT head, supports processing by chunking frames.
         Args:
-            aggregated_tokens_list (List[Tensor]): List of token tensors from different transformer layers.
+            aggregated_tokens_list (Dict[int, Tensor]): List of token tensors from different transformer layers.
             images (Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
             patch_start_idx (int): Starting index for patch tokens in the token sequence.
                 Used to separate patch tokens from other tokens (e.g., camera or register tokens).
@@ -192,10 +211,9 @@ class DPTHead(nn.Module):
         Returns:
             Tensor or Tuple[Tensor, Tensor]: Feature maps or (predictions, confidence).
         """
-        if frames_start_idx is not None and frames_end_idx is not None:
-            images = images[:, frames_start_idx:frames_end_idx].contiguous()
-
         B, S, _, H, W = images.shape
+        if frames_start_idx is not None and frames_end_idx is not None:
+            S = frames_end_idx - frames_start_idx
 
         patch_h, patch_w = H // self.patch_size, W // self.patch_size
 
@@ -209,7 +227,7 @@ class DPTHead(nn.Module):
             if frames_start_idx is not None and frames_end_idx is not None:
                 x = x[:, frames_start_idx:frames_end_idx]
 
-            x = x.view(B * S, -1, x.shape[-1])
+            x = x.reshape(B * S, -1, x.shape[-1])
 
             x = self.norm(x)
 
@@ -217,7 +235,7 @@ class DPTHead(nn.Module):
 
             x = self.projects[dpt_idx](x)
             if self.pos_embed:
-                x = self._apply_pos_embed(x, W, H)
+                self._apply_pos_embed(x, W, H)
             x = self.resize_layers[dpt_idx](x)
 
             out.append(x)
@@ -225,6 +243,7 @@ class DPTHead(nn.Module):
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)
+        torch.cuda.empty_cache()
         # Interpolate fused output to match target image resolution.
         out = custom_interpolate(
             out,
@@ -232,14 +251,28 @@ class DPTHead(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
+        torch.cuda.empty_cache()
 
         if self.pos_embed:
-            out = self._apply_pos_embed(out, W, H)
+            self._apply_pos_embed(out, W, H)
 
         if self.feature_only:
             return out.view(B, S, *out.shape[1:])
 
-        out = self.scratch.output_conv2(out)
+        # out = self.scratch.output_conv2(out)
+        # out = self.scratch.output_conv2.float()(out.float())
+        # out = self.scratch.output_conv2.half()(out.half())
+        # out = self.scratch.output_conv2[-1].float()(self.scratch.output_conv2[:2](out).float())
+
+        out1 = torch.empty((out.shape[0], self.output_dim, *out.shape[2:]),
+                           dtype=torch.float32, device=out.device).contiguous()
+        mini_batch = 4
+        for i0 in range(0, out.shape[0], mini_batch):
+            i1 = min(i0 + mini_batch, out.shape[0])
+            out1[i0:i1] = self.scratch.output_conv2(out[i0:i1].float().contiguous())
+        out = out1
+        torch.cuda.empty_cache()
+
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
 
         preds = preds.view(B, S, *preds.shape[1:])
@@ -255,8 +288,11 @@ class DPTHead(nn.Module):
         pos_embed = create_uv_grid(patch_w, patch_h, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
         pos_embed = position_grid_to_embed(pos_embed, x.shape[1])
         pos_embed = pos_embed * ratio
-        pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
-        return (x + pos_embed).to(x.dtype)
+        pos_embed = pos_embed.permute(2, 0, 1).contiguous()#[None].expand(x.shape[0], -1, -1, -1)
+        # return x + pos_embed
+        # x.add_(pos_embed); return x
+        for i in range(x.shape[0]):
+            x[i] += pos_embed
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
         """
@@ -271,21 +307,25 @@ class DPTHead(nn.Module):
         layer_1, layer_2, layer_3, layer_4 = features
 
         layer_1_rn = self.scratch.layer1_rn(layer_1)
+        del layer_1
         layer_2_rn = self.scratch.layer2_rn(layer_2)
+        del layer_2
         layer_3_rn = self.scratch.layer3_rn(layer_3)
+        del layer_3
         layer_4_rn = self.scratch.layer4_rn(layer_4)
+        del layer_4
 
         out = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
-        del layer_4_rn, layer_4
+        del layer_4_rn
 
         out = self.scratch.refinenet3(out, layer_3_rn, size=layer_2_rn.shape[2:])
-        del layer_3_rn, layer_3
+        del layer_3_rn
 
         out = self.scratch.refinenet2(out, layer_2_rn, size=layer_1_rn.shape[2:])
-        del layer_2_rn, layer_2
+        del layer_2_rn
 
         out = self.scratch.refinenet1(out, layer_1_rn)
-        del layer_1_rn, layer_1
+        del layer_1_rn
 
         out = self.scratch.output_conv1(out)
         return out
@@ -440,6 +480,7 @@ class FeatureFusionBlock(nn.Module):
         if self.has_residual:
             res = self.resConfUnit1(xs[1])
             output = self.skip_add.add(output, res)
+            del res
 
         output = self.resConfUnit2(output)
 
@@ -451,6 +492,7 @@ class FeatureFusionBlock(nn.Module):
             modifier = {"size": size}
 
         output = custom_interpolate(output, **modifier, mode="bilinear", align_corners=self.align_corners)
+        torch.cuda.empty_cache()
         output = self.out_conv(output)
 
         return output
@@ -466,6 +508,8 @@ def custom_interpolate(
     """
     Custom interpolate to avoid INT_MAX issues in nn.functional.interpolate.
     """
+    torch.cuda.empty_cache()
+
     if size is None:
         size = (int(x.shape[-2] * scale_factor), int(x.shape[-1] * scale_factor))
 

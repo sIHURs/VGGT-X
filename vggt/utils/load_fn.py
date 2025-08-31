@@ -58,23 +58,24 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
         left = (max_dim - width) // 2
         top = (max_dim - height) // 2
 
+        # Calculate scale factor for resizing
+        scale = target_size / max_dim
+
+        # Calculate final coordinates of original image in target space
+        x1 = left * scale
+        y1 = top * scale
+        x2 = (left + width) * scale
+        y2 = (top + height) * scale
+
+        # Store original image coordinates and scale
+        original_coords.append(np.array([x1, y1, x2, y2, width, height]))
+
         # Create a new black square image and paste original
         square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
         square_img.paste(img, (left, top))
 
         # Resize to target size
         square_img = square_img.resize((target_size, target_size), Image.Resampling.BICUBIC)
-
-        # automatically find the top left and bottom right corners of the original image
-        height_sum = torch.tensor(np.array(square_img)).permute(2, 0, 1).sum(dim=(0, 1))
-        width_sum = torch.tensor(np.array(square_img)).permute(2, 0, 1).sum(dim=(0, 2))
-        x1 = (height_sum > 0).nonzero(as_tuple=True)[0][0].item()
-        y1 = (width_sum > 0).nonzero(as_tuple=True)[0][0].item()
-        x2 = (height_sum > 0).nonzero(as_tuple=True)[0][-1].item()
-        y2 = (width_sum > 0).nonzero(as_tuple=True)[0][-1].item()
-
-        # Store original image coordinates and scale
-        original_coords.append(np.array([x1, y1, x2, y2, width, height]))
 
         # Convert to tensor
         img_tensor = to_tensor(square_img)

@@ -74,7 +74,7 @@ class TrackHead(nn.Module):
         Forward pass of the TrackHead.
 
         Args:
-            aggregated_tokens_list (list): List of aggregated tokens from the backbone.
+            aggregated_tokens_list (dict): Dict of aggregated tokens from the backbone.
             images (torch.Tensor): Input images of shape (B, S, C, H, W) where:
                                    B = batch size, S = sequence length.
             patch_start_idx (int): Starting index for patch tokens.

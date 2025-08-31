@@ -290,13 +290,15 @@ class CorrBlock:
             corrs = self.corrs_pyramid[i]  # B, S, N, H, W
             *_, H, W = corrs.shape
 
-            dx = torch.linspace(-r, r, 2 * r + 1)
-            dy = torch.linspace(-r, r, 2 * r + 1)
+            dx = torch.linspace(-r, r, 2 * r + 1).to(corrs.dtype)
+            dy = torch.linspace(-r, r, 2 * r + 1).to(corrs.dtype)
             delta = torch.stack(torch.meshgrid(dy, dx, indexing="ij"), axis=-1).to(coords.device)
 
-            centroid_lvl = coords.reshape(B * S * N, 1, 1, 2) / 2**i
+            centroid_lvl = coords.reshape(B * S * N, 1, 1, 2).to(corrs.dtype) / 2**i
             delta_lvl = delta.view(1, 2 * r + 1, 2 * r + 1, 2)
             coords_lvl = centroid_lvl + delta_lvl
+            del centroid_lvl
+            del delta_lvl
 
             corrs = bilinear_sampler(corrs.reshape(B * S * N, 1, H, W), coords_lvl, padding_mode=self.padding_mode)
             corrs = corrs.view(B, S, N, -1)
@@ -325,5 +327,6 @@ class CorrBlock:
                 fmap1 = targets_split[i]
             corrs = torch.matmul(fmap1, fmap2s)
             corrs = corrs.view(B, S, N, H, W)  # B S N (H W) -> B S N H W
-            corrs = corrs / torch.sqrt(torch.tensor(C).float())
+            # corrs = corrs / torch.sqrt(torch.tensor(C).float())
+            corrs.div_(C**0.5)
             self.corrs_pyramid.append(corrs)

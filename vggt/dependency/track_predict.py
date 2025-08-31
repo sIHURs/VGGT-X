@@ -168,14 +168,16 @@ def _forward_on_query(
     """
     frame_num, _, height, width = images.shape
 
-    query_image = images[query_index]
+    query_image = images[query_index].float()
     query_points = extract_keypoints(query_image, keypoint_extractors, round_keypoints=False)
     query_points = query_points[:, torch.randperm(query_points.shape[1], device=device)]
 
     # Extract the color at the keypoint locations
     query_points_long = query_points.squeeze(0).round().long()
-    pred_color = images[query_index][:, query_points_long[:, 1], query_points_long[:, 0]]
+    pred_color = query_image[:, query_points_long[:, 1], query_points_long[:, 0]]
     pred_color = (pred_color.permute(1, 0).cpu().numpy() * 255).astype(np.uint8)
+    del query_points_long
+    del query_image
 
     # Query the confidence and points_3d at the keypoint locations
     if (conf is not None) and (points_3d is not None):
@@ -189,6 +191,8 @@ def _forward_on_query(
 
         pred_conf = conf[query_index][query_points_scaled[:, 1], query_points_scaled[:, 0]]
         pred_point_3d = points_3d[query_index][query_points_scaled[:, 1], query_points_scaled[:, 0]]
+
+        del query_points_scaled
 
         # heuristic to remove low confidence points
         # should I export this as an input parameter?
@@ -204,6 +208,7 @@ def _forward_on_query(
 
     reorder_index = calculate_index_mappings(query_index, frame_num, device=device)
 
+    fmaps_for_tracker = fmaps_for_tracker.to(images.dtype)
     images_feed, fmaps_feed = switch_tensor_order([images, fmaps_for_tracker], reorder_index, dim=0)
     images_feed = images_feed[None]  # add batch dimension
     fmaps_feed = fmaps_feed[None]  # add batch dimension

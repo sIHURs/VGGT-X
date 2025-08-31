@@ -91,6 +91,7 @@ def refine_track(
     # because the ouput of pytorch unfold are indexed by top left corner
     topleft = track_int - pradius
     topleft_BSN = topleft.clone()
+    del track_int
 
     # clamp the values so that we will not go out of indexes
     # NOTE: (VERY IMPORTANT: This operation ASSUMES H=W).
@@ -104,21 +105,28 @@ def refine_track(
     batch_indices = torch.arange(B * S)[:, None].expand(-1, N).to(content_to_extract.device)
 
     # extracted_patches: (B*S) x N x C_in x Psize x Psize
-    extracted_patches = content_to_extract[batch_indices, :, topleft[..., 1], topleft[..., 0]]
+    patches = content_to_extract[batch_indices, :, topleft[..., 1], topleft[..., 0]]
+    del batch_indices
+    del topleft
+
+    C_out = fine_fnet.in_planes
 
     if chunk < 0:
         # Extract image patches based on top left corners
         # Feed patches to fine fent for features
-        patch_feat = fine_fnet(extracted_patches.reshape(B * S * N, C_in, psize, psize))
+        patch_feat = fine_fnet(patches.reshape(B * S * N, C_in, psize, psize))
     else:
-        patches = extracted_patches.reshape(B * S * N, C_in, psize, psize)
+        patches = patches.reshape(B * S * N, C_in, psize, psize)
 
-        patch_feat_list = []
-        for p in torch.split(patches, chunk):
-            patch_feat_list += [fine_fnet(p)]
-        patch_feat = torch.cat(patch_feat_list, 0)
+        patch_feat = torch.empty((len(patches), C_out, *patches.shape[2:]), device=patches.device, dtype=patches.dtype)
 
-    C_out = patch_feat.shape[1]
+        for i in range(0, len(patches), chunk):
+            patch_feat[i:i+chunk] = fine_fnet(patches[i:i+chunk])
+
+        # patch_feat_list = []
+        # for p in torch.split(patches, chunk):
+        #     patch_feat_list += [fine_fnet(p)]
+        # patch_feat = torch.cat(patch_feat_list, 0)
 
     # Refine the coarse tracks by fine_tracker
     # reshape back to B x S x N x C_out x Psize x Psize

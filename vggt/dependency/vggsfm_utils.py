@@ -285,6 +285,7 @@ def predict_tracks_in_chunks(
     pred_score_list = []
 
     for split_points in query_points_list:
+        split_points = split_points.to(images_feed.dtype)
         # Feed into track predictor for each split
         fine_pred_track, _, pred_vis, pred_score = track_predictor(
             images_feed, split_points, fmaps=fmaps_feed, fine_tracking=fine_tracking, fine_chunk=fine_chunk

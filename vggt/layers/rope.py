@@ -177,12 +177,13 @@ class RotaryPositionEmbedding2D(nn.Module):
         max_position = int(positions.max()) + 1
         cos_comp, sin_comp = self._compute_frequency_components(feature_dim, max_position, tokens.device, tokens.dtype)
 
+        # WARNING: modifies input in place
+
         # Split features for vertical and horizontal processing
-        vertical_features, horizontal_features = tokens.chunk(2, dim=-1)
+        sep = tokens.shape[-1] // 2
 
         # Apply RoPE separately for each dimension
-        vertical_features = self._apply_1d_rope(vertical_features, positions[..., 0], cos_comp, sin_comp)
-        horizontal_features = self._apply_1d_rope(horizontal_features, positions[..., 1], cos_comp, sin_comp)
+        tokens[..., :sep] = self._apply_1d_rope(tokens[..., :sep], positions[..., 0], cos_comp, sin_comp)
+        tokens[..., sep:] = self._apply_1d_rope(tokens[..., sep:], positions[..., 1], cos_comp, sin_comp)
 
-        # Combine processed features
-        return torch.cat((vertical_features, horizontal_features), dim=-1)
+        return tokens

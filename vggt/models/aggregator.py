@@ -8,6 +8,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
 
 from vggt.layers import PatchEmbed
@@ -16,6 +17,12 @@ from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
 from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
+
+def print_mem(tag):
+    cur = torch.cuda.memory_allocated() / (1024**2)
+    peak = torch.cuda.max_memory_allocated() / (1024**2)
+    print(f"{tag}: cur = {cur:.2f} MB, peak = {peak:.2f} MB")
+
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
@@ -26,6 +33,7 @@ class Aggregator(nn.Module):
     The Aggregator applies alternating-attention over input frames,
     as described in VGGT: Visual Geometry Grounded Transformer.
 
+    Remember to set model.train() to enable gradient checkpointing to reduce memory usage.
 
     Args:
         img_size (int): Image size in pixels.
@@ -136,6 +144,8 @@ class Aggregator(nn.Module):
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
             self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
 
+        self.use_reentrant = False # hardcoded to False
+
     def __build_patch_embed__(
         self,
         patch_embed,
@@ -177,13 +187,11 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor, intermediate_layer_idx: list, chunk_size=128) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, verbose: bool = False, chunk_size=128) -> Tuple[Dict[int, torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
-            intermediate_layer_idx (list): List of layer indices to return outputs from.
-            chunk_size (int): Size of the chunk to process at a time.
 
         Returns:
             (list[torch.Tensor], int):
@@ -191,15 +199,23 @@ class Aggregator(nn.Module):
                 and the patch_start_idx indicating where patch tokens begin.
         """
         B, S, C_in, H, W = images.shape
+        dtype = images.dtype
+        device = images.device
 
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
+
+        if self.camera_token.dtype != dtype or self.register_token.dtype != dtype:
+            self.camera_token = nn.Parameter(self.camera_token.to(dtype))
+            self.register_token = nn.Parameter(self.register_token.to(dtype))
+            torch.cuda.empty_cache()
 
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*S, C, H, W] for patch embedding
-        # Using chunk_size to avoid memory issues
+        if verbose:
+            print("Running patch embedding")
         images = images.view(B * S, C_in, H, W)
         patch_tokens_list = []
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -213,7 +229,7 @@ class Aggregator(nn.Module):
             patch_tokens_list.append(patch_tokens_chunk)
         # Concatenate patch tokens from all chunks
         patch_tokens = torch.cat(patch_tokens_list, dim=0)
-        del patch_tokens_list
+        del patch_tokens_list, images
 
         _, P, C = patch_tokens.shape
 
@@ -223,31 +239,39 @@ class Aggregator(nn.Module):
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
+        del camera_token
+        del register_token
+        del patch_tokens
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=device)
 
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
+            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
+            del pos_special
 
         # update P because we added special tokens
         _, P, C = tokens.shape
 
         frame_idx = 0
         global_idx = 0
-        layer_idx = 0
-        output_list = []
+        output_list = {}
 
-        for _ in range(self.aa_block_num):
+        iter_obj = range(self.aa_block_num)
+        if verbose:
+            from tqdm import tqdm
+            iter_obj = tqdm(iter_obj, "Running attention")
+        for _ in iter_obj:
+            assert tokens.dtype == dtype
             for attn_type in self.aa_order:
                 if attn_type == "frame":
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos, chunk_size=chunk_size
+                        tokens, B, S, P, C, frame_idx, pos=pos
                     )
                 elif attn_type == "global":
                     tokens, global_idx, global_intermediates = self._process_global_attention(
@@ -256,14 +280,26 @@ class Aggregator(nn.Module):
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
+                # torch.cuda.empty_cache()
+
+            # only these layers are used by prediction heads, all others are unused
+            # P.S. camera head only uses layer 23 with patch idx 0
+            used_intermediate_layer_idx = [4, 11, 17, 23]
+            if _ not in used_intermediate_layer_idx:
+                continue
+
+            if True:
+                for i in range(len(frame_intermediates)):
+                    assert frame_intermediates[i].dtype == dtype
+                    assert global_intermediates[i].dtype == dtype
+                    # frame_intermediates[i] = frame_intermediates[i].to(dtype)
+                    # global_intermediates[i] = global_intermediates[i].to(dtype)
+
+            assert len(frame_intermediates) == 1
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                if layer_idx in intermediate_layer_idx:
-                    output_list.append(concat_inter.cpu())
-                else:
-                    output_list.append(None)
-                layer_idx += 1
+                output_list[_] = concat_inter.cpu()
 
         del concat_inter
         del frame_intermediates

@@ -76,25 +76,15 @@ class Block(nn.Module):
 
     def forward(self, x: Tensor, pos=None) -> Tensor:
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-            return self.ls1(self.attn(self.norm1(x), pos=pos))
+            x = self.norm1(x).to(x.dtype)
+            return self.ls1(self.attn(x, pos=pos))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
-            return self.ls2(self.mlp(self.norm2(x)))
+            x = self.norm2(x).to(x.dtype)
+            return self.ls2(self.mlp(x))
 
-        if self.training and self.sample_drop_ratio > 0.1:
-            # the overhead is compensated only for a drop path rate larger than 0.1
-            x = drop_add_residual_stochastic_depth(
-                x, pos=pos, residual_func=attn_residual_func, sample_drop_ratio=self.sample_drop_ratio
-            )
-            x = drop_add_residual_stochastic_depth(
-                x, residual_func=ffn_residual_func, sample_drop_ratio=self.sample_drop_ratio
-            )
-        elif self.training and self.sample_drop_ratio > 0.0:
-            x = x + self.drop_path1(attn_residual_func(x, pos=pos))
-            x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
-        else:
-            x = x + attn_residual_func(x, pos=pos)
-            x = x + ffn_residual_func(x)
+        x = x + attn_residual_func(x, pos=pos)
+        x = x + ffn_residual_func(x)
         return x
 
 

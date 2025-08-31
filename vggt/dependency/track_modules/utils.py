@@ -119,7 +119,7 @@ def get_2d_embedding(xy: torch.Tensor, C: int, cat_coords: bool = True) -> torch
     pe = torch.cat([pe_x, pe_y], dim=2)  # (B, N, C*3)
     if cat_coords:
         pe = torch.cat([xy, pe], dim=2)  # (B, N, C*3+3)
-    return pe
+    return pe.to(xy.dtype)
 
 
 def bilinear_sampler(input, coords, align_corners=True, padding_mode="border"):
@@ -174,9 +174,9 @@ def bilinear_sampler(input, coords, align_corners=True, padding_mode="border"):
         coords = coords[..., [1, 2, 0]]
 
     if align_corners:
-        coords = coords * torch.tensor([2 / max(size - 1, 1) for size in reversed(sizes)], device=coords.device)
+        coords = coords * torch.tensor([2 / max(size - 1, 1) for size in reversed(sizes)], dtype=coords.dtype, device=coords.device)
     else:
-        coords = coords * torch.tensor([2 / size for size in reversed(sizes)], device=coords.device)
+        coords = coords * torch.tensor([2 / size for size in reversed(sizes)], dtype=coords.dtype, device=coords.device)
 
     coords -= 1
 

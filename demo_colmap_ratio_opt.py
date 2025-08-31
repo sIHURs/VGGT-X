@@ -42,6 +42,7 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 # TODO: test with more cases
 # TODO: test different camera types
 
+torch._dynamo.config.accumulated_cache_size_limit = 512
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
@@ -59,38 +60,6 @@ def parse_args():
         "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
     )
     return parser.parse_args()
-
-
-def run_VGGT(model, images, dtype, resolution=518):
-    # images: [B, 3, H, W]
-
-    assert len(images.shape) == 4
-    assert images.shape[1] == 3
-
-    device = next(model.parameters()).device
-    images = images.to(device)
-
-    with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            images = images[None]  # add batch dimension
-            valid_layers = model.depth_head.intermediate_layer_idx
-            if valid_layers[-1] != model.aggregator.aa_block_num - 1:
-                valid_layers.append(model.aggregator.aa_block_num - 1)
-            aggregated_tokens_list, ps_idx = model.aggregator(images, valid_layers)
-            aggregated_tokens_list = [tokens.to(device) if tokens is not None else None for tokens in aggregated_tokens_list]
-
-        # Predict Cameras
-        pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-        # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-        # Predict Depth Maps
-        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
-
-    extrinsic = extrinsic.squeeze(0).cpu().numpy()
-    intrinsic = intrinsic.squeeze(0).cpu().numpy()
-    depth_map = depth_map.squeeze(0).cpu().numpy()
-    depth_conf = depth_conf.squeeze(0).cpu().numpy()
-    return extrinsic, intrinsic, depth_map, depth_conf
 
 def demo_fn(args):
     # Print configuration
@@ -120,7 +89,7 @@ def demo_fn(args):
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
-    model = model.to(device)
+    model = model.to(device).to(dtype)
     print(f"Model loaded")
 
     # Get image paths and preprocess them
@@ -157,7 +126,16 @@ def demo_fn(args):
 
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype)
+    # extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype)
+    with torch.no_grad():
+        predictions = model(images.to(device, dtype), verbose=True)
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'], images.shape[-2:])
+        extrinsic = extrinsic.squeeze(0).cpu().numpy()
+        intrinsic = intrinsic.squeeze(0).cpu().numpy()
+        depth_map = predictions['depth'].squeeze(0).cpu().numpy()
+        depth_conf = predictions['depth_conf'].squeeze(0).cpu().numpy()
+        del predictions
+    
     images = images.to(device)
 
     if args.use_opt:

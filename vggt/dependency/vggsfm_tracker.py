@@ -85,6 +85,7 @@ class TrackerPredictor(nn.Module):
             query_points=query_points, fmaps=fmaps, iters=coarse_iters, down_ratio=self.coarse_down_ratio
         )
         coarse_pred_track = coarse_pred_track_lists[-1]
+        del coarse_pred_track_lists
 
         if inference:
             torch.cuda.empty_cache()

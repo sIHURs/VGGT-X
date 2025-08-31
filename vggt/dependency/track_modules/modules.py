@@ -121,7 +121,15 @@ class Mlp(nn.Module):
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
         self.drop2 = nn.Dropout(drop_probs[1])
 
+    @torch.compile
+    def forward_infer(self, x):
+        x = self.fc1(x)
+        x = 0.5 * x * (1 + torch.erf(x * 2**-0.5))
+        x = self.fc2(x)
+        return x
+
     def forward(self, x):
+        return self.forward_infer(x)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop1(x)
