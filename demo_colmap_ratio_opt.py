@@ -32,9 +32,7 @@ from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
-from vggt.dependency.track_predict import predict_tracks
-from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
-
+from vggt.dependency.np_to_pycolmap import  batch_np_matrix_to_pycolmap_wo_track
 
 # TODO: add support for masks
 # TODO: add iterative BA
@@ -43,6 +41,27 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 # TODO: test different camera types
 
 torch._dynamo.config.accumulated_cache_size_limit = 512
+
+def run_VGGT(images, device, dtype):
+    # images: [B, 3, H, W]
+
+    # Run VGGT for camera and depth estimation
+    model = VGGT()
+    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model.eval()
+    model = model.to(device).to(dtype)
+    print(f"Model loaded")
+
+    with torch.no_grad():
+        predictions = model(images.to(device, dtype), verbose=True)
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'], images.shape[-2:])
+        extrinsic = extrinsic.squeeze(0).cpu().numpy()
+        intrinsic = intrinsic.squeeze(0).cpu().numpy()
+        depth_map = predictions['depth'].squeeze(0).cpu().numpy()
+        depth_conf = predictions['depth_conf'].squeeze(0).cpu().numpy()
+    
+    return extrinsic, intrinsic, depth_map, depth_conf
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
@@ -55,7 +74,7 @@ def parse_args():
     parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
-    parser.add_argument("--max_query_pts", type=int, default=4096, help="Maximum number of query points")
+    parser.add_argument("--max_query_pts", type=int, default=None, help="Maximum number of query points")
     parser.add_argument(
         "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
     )
@@ -83,14 +102,6 @@ def demo_fn(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")
-
-    # Run VGGT for camera and depth estimation
-    model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
-    model.eval()
-    model = model.to(device).to(dtype)
-    print(f"Model loaded")
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
@@ -126,30 +137,28 @@ def demo_fn(args):
 
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
-    # extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype)
-    with torch.no_grad():
-        predictions = model(images.to(device, dtype), verbose=True)
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'], images.shape[-2:])
-        extrinsic = extrinsic.squeeze(0).cpu().numpy()
-        intrinsic = intrinsic.squeeze(0).cpu().numpy()
-        depth_map = predictions['depth'].squeeze(0).cpu().numpy()
-        depth_conf = predictions['depth_conf'].squeeze(0).cpu().numpy()
-        del predictions
+    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype)
     
     images = images.to(device)
 
     if args.use_opt:
         import utils.opt as opt_utils
-        output = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+        if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
+            print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
+            output = torch.load(os.path.join(target_scene_dir, "matches.pt"))
+        else:
+            if args.max_query_pts is None:
+                args.max_query_pts = 4096 if len(images) < 500 else 2048
+            output = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+            output["original_width"] = images.shape[-1]
+            output["original_height"] = images.shape[-2]
+            torch.save(output, os.path.join(target_scene_dir, "matches.pt"))
+            print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
         extrinsic, intrinsic = opt_utils.pose_optimization(
             output, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
         )
-        output["original_width"] = images.shape[-1]
-        output["original_height"] = images.shape[-2]
-        torch.save(output, os.path.join(target_scene_dir, "matches.pt"))
-        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
-
+        
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 

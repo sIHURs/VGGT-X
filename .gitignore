@@ -154,3 +154,5 @@ data
 cub-1.10.0
 notebooks/track_visuals*
 *.html
+notebooks/*.pt
+notebooks/*.npz
