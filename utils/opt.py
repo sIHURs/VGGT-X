@@ -22,7 +22,7 @@ def make_K_cam_depth(log_focals, pps, trans, quats, min_focals, max_focals, imsi
 
     return K, (w2cs, torch.linalg.inv(w2cs))
 
-def get_default_lr(epipolar_err, bound1=2.5, bound2=5.0):
+def get_default_lr(epipolar_err, bound1=2.5, bound2=7.5):
 
     assert bound2 > bound1, print("bound2 should be greater than bound1")
 
@@ -98,12 +98,12 @@ def image_pair_candidates(extrinsic, pairing_angle_threshold=30, unique_pairs=Fa
     return pairs, pairs_cnt
 
 @torch.inference_mode()
-def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096):
+def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=256):
 
     xfeat = torch.hub.load('/home/jing_li/.cache/torch/hub/verlab_accelerated_features_main', 
                            'XFeat', source='local', pretrained=True, top_k=max_query_pts)  # TODO: remove the local path
 
-    pairs, pairs_cnt = image_pair_candidates(extrinsic, pairing_angle_threshold=30, unique_pairs=True)
+    pairs, pairs_cnt = image_pair_candidates(extrinsic, 30, unique_pairs=True)
     print("Total candidate image pairs found: ", pairs_cnt)
 
     indexes_i = list(range(len(base_image_path_list)-1))  # the last image 
@@ -113,7 +113,7 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
     indexes_i = np.concatenate(indexes_i).tolist()
     indexes_j = np.concatenate(indexes_j).tolist()
 
-    batch_size, matches_list = 100, []
+    matches_list = []
 
     for i in tqdm(range(0, len(indexes_i), batch_size), desc="Matching image pairs..."):
         indexes_i_batch = indexes_i[i:i + batch_size]
@@ -262,43 +262,15 @@ def pose_optimization(match_outputs,
             log_focals = focal_m.view(1).log()
         else:
             log_focals = base_focals.log()
-        
-        depth_map_tensor = torch.tensor(depth_map)  # [B, H, W]
 
         corr_points_i = match_outputs["corr_points_i"].clone()
         corr_points_j = match_outputs["corr_points_j"].clone()
         corr_weights = match_outputs["corr_weights"].clone()
         num_matches = match_outputs["num_matches"]
-
-        imsizes = imsizes.to(corr_points_i.device)
-        depth_map_tensor = depth_map_tensor.to(corr_points_i.device)
-        
-        corr_points_i_normalized = corr_points_i / imsizes[None, None, [1, 0]] * 2 - 1
-        corr_points_j_normalized = corr_points_j / imsizes[None, None, [1, 0]] * 2 - 1
-
         indexes_i = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_i"]]
         indexes_j = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_j"]]
-
-        depths_i_list, depths_j_list, depth_batch_size = [], [], 16
-        for start_idx in range(0, len(corr_points_i_normalized), depth_batch_size):
-            end_idx = min(start_idx + depth_batch_size, len(corr_points_i_normalized))
-            depths_i_list.append(F.grid_sample(
-                depth_map_tensor[indexes_i[start_idx:end_idx]].permute(0, 3, 1, 2),
-                corr_points_i_normalized[start_idx:end_idx, None],
-                align_corners=True,
-                mode='bilinear'
-            ).squeeze(1, 2))
-
-            depths_j_list.append(F.grid_sample(
-                depth_map_tensor[indexes_j[start_idx:end_idx]].permute(0, 3, 1, 2),
-                corr_points_j_normalized[start_idx:end_idx, None],
-                align_corners=True,
-                mode='bilinear'
-            ).squeeze(1, 2))
+        imsizes = imsizes.to(corr_points_i.device)
         
-        depths_i = torch.cat(depths_i_list, dim=0).to(device).squeeze(-1)
-        depths_j = torch.cat(depths_j_list, dim=0).to(device).squeeze(-1) 
-
     qvec = qvec.to(device)
     tvec = tvec.to(device)
     log_sizes = log_sizes.to(device)
@@ -342,37 +314,16 @@ def pose_optimization(match_outputs,
         Ks_j = K[indexes_j]
         w2cam_i = w2cam[indexes_i]
         w2cam_j = w2cam[indexes_j]
-        cam2w_i = cam2w[indexes_i]
-        cam2w_j = cam2w[indexes_j]
 
         loss = 0.0
 
-        sizes = log_sizes.exp()
-        depths_i_scaled = depths_i * sizes[indexes_i, None] / sizes.min()
-        depths_j_scaled = depths_j * sizes[indexes_j, None] / sizes.min()
-        
-        cam_coords_i = torch.stack([
-            (corr_points_i[..., 0] - Ks_i[:, None, 0, 2]) / Ks_i[:, None, 0, 0] * depths_i_scaled,
-            (corr_points_i[..., 1] - Ks_i[:, None, 1, 2]) / Ks_i[:, None, 1, 1] * depths_i_scaled,
-            depths_i_scaled
-        ], dim=-1)
-        cam_coords_j = torch.stack([
-            (corr_points_j[..., 0] - Ks_j[:, None, 0, 2]) / Ks_j[:, None, 0, 0] * depths_j_scaled,
-            (corr_points_j[..., 1] - Ks_j[:, None, 1, 2]) / Ks_j[:, None, 1, 1] * depths_j_scaled,
-            depths_j_scaled
-        ], dim=-1)
-        world_coords_i = (cam_coords_i @ cam2w_i[:, :3, :3].permute(0, 2, 1)) + cam2w_i[:, None, :3, 3]
-        world_coords_j = (cam_coords_j @ cam2w_j[:, :3, :3].permute(0, 2, 1)) + cam2w_j[:, None, :3, 3]
-
-        loss_3d = ((world_coords_i - world_coords_j).abs() * corr_weight_valid).mean() * lambda_3d
-
+        # batchify the computation to avoid OOM
         P_i = Ks_i @ w2cam_i
         P_j = Ks_j @ w2cam_j
         Fm = kornia.geometry.epipolar.fundamental_from_projections(P_i[:, :3], P_j[:, :3])
         err = kornia.geometry.symmetrical_epipolar_distance(corr_points_i, corr_points_j, Fm, squared=False, eps=1e-08)
-        loss_epi = (err * corr_weight_valid.squeeze(-1)).mean() * lambda_epi
+        loss = (err * corr_weight_valid.squeeze(-1)).mean() * lambda_epi
 
-        loss = loss_3d + loss_epi
         loss_list.append(loss.item())
 
         loss.backward()

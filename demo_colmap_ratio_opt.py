@@ -145,17 +145,17 @@ def demo_fn(args):
         import utils.opt as opt_utils
         if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
             print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
-            output = torch.load(os.path.join(target_scene_dir, "matches.pt"))
+            match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
         else:
             if args.max_query_pts is None:
                 args.max_query_pts = 4096 if len(images) < 500 else 2048
-            output = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
-            output["original_width"] = images.shape[-1]
-            output["original_height"] = images.shape[-2]
-            torch.save(output, os.path.join(target_scene_dir, "matches.pt"))
+            match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+            match_outputs["original_width"] = images.shape[-1]
+            match_outputs["original_height"] = images.shape[-2]
+            torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
             print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
         extrinsic, intrinsic = opt_utils.pose_optimization(
-            output, extrinsic, intrinsic, images, depth_map, depth_conf,
+            match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
         )
         
@@ -262,9 +262,24 @@ def demo_fn(args):
     # (S, H, W, 3), with x, y coordinates and frame indices
     points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
 
-    conf_mask = depth_conf >= conf_thres_value
-    # at most writing max_points_for_colmap 3d points to colmap reconstruction object
-    conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+    if args.use_opt:
+        conf_mask = np.zeros_like(depth_conf, dtype=bool)
+        corr_points_i = np.round(match_outputs["corr_points_i"].cpu().numpy()).astype(int)
+        corr_points_j = np.round(match_outputs["corr_points_j"].cpu().numpy()).astype(int)
+        indexes_i = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_i"]]
+        indexes_j = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_j"]]
+        corr_weights = match_outputs["corr_weights"].cpu().numpy()
+        for i in range(len(indexes_i)):
+            single_mask = (corr_weights[i] > 0.1)
+            conf_mask[indexes_i[i], corr_points_i[i, single_mask[:, 0], 1], corr_points_i[i, single_mask[:, 0], 0]] = True
+        for j in range(len(indexes_j)):
+            if j not in indexes_i:
+                single_mask = (corr_weights[j] > 0.1)
+                conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
+    else:
+        conf_mask = depth_conf >= conf_thres_value
+        # at most writing max_points_for_colmap 3d points to colmap reconstruction object
+        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
 
     points_3d = points_3d[conf_mask]
     points_xyf = points_xyf[conf_mask]
