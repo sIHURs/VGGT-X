@@ -44,7 +44,7 @@ def evaluate_pcd(
         avg_dist = np.mean(distances)
         std_dev_dist = np.std(distances)
 
-        mask_distance = distances < avg_dist
+        mask_distance = distances < avg_dist + 2 * std_dev_dist
         xys_gt = xys_gt[mask_distance]
         pcd_xyz_gt = pcd_xyz_gt[mask_distance]
         pcd_rgb_gt = pcd_rgb_gt[mask_distance]
@@ -86,6 +86,16 @@ def evaluate_pcd(
     pcd_tgt = o3d.geometry.PointCloud()
     pcd_tgt.points = o3d.utility.Vector3dVector(pcd_xyz_sampled_array)
     pcd_tgt.colors = o3d.utility.Vector3dVector(pcd_rgb_sampled_array)
+
+    trans_init, threshold  = np.eye(4), 0.1
+    reg_p2p = o3d.pipelines.registration.registration_icp(
+        pcd_tgt,
+        pcd_src,
+        threshold,
+        trans_init,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+    )
+    pcd_tgt.transform(reg_p2p.transformation)
 
     completeness = pcd_src.compute_point_cloud_distance(pcd_tgt)
     accuracy = pcd_tgt.compute_point_cloud_distance(pcd_src)
