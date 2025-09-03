@@ -197,19 +197,18 @@ def demo_fn(args):
 
             # auc_results = evaluate_auc(pred_se3, gt_se3, device)
             pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
-            auc_results = evaluate_auc(gt_se3, pred_se3, device)
+            auc_results = evaluate_auc(pred_se3, gt_se3, device)
 
             # align gt points to prediction
             camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
             camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-            c, R, t = umeyama(camera_centers_gt.T, camera_centers_pred.T)
-            for point_id, point in pcd_gt.items():
-                point.xyz = (c * R @ point.xyz + t.squeeze())
+            c, R, t = umeyama(camera_centers_pred.T, camera_centers_gt.T)
+            points_3d = c * (points_3d @ R.T) + t.T
             
             pcd_results = evaluate_pcd(
                 pcd_gt, points_3d, depth_conf, images,
                 images_gt_updated, original_coords, 
-                img_load_resolution, conf_thresh=1.0
+                img_load_resolution, conf_thresh=1.5
             )
 
             result_file = os.path.join(target_scene_dir, "vggt_results.txt")
