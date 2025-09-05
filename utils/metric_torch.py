@@ -159,7 +159,7 @@ def evaluate_auc(pred_se3, gt_se3, device, return_aligned=False):
     }
 
     if return_aligned:
-        return results, pred_se3_aligned, c
+        return results, pred_se3_aligned, c, R, t
     else:
         return results
     

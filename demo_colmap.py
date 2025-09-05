@@ -45,6 +45,7 @@ torch._dynamo.config.accumulated_cache_size_limit = 512
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--post_fix", type=str, required=True, help="post fix for the output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
     ######### BA parameters #########
@@ -292,7 +293,7 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
-    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_ba", os.path.basename(args.scene_dir))
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}{args.post_fix}", os.path.basename(args.scene_dir))
     os.makedirs(target_scene_dir, exist_ok=True)
     for item in os.listdir(args.scene_dir):
         if item != "sparse":
