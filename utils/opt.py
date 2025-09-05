@@ -98,7 +98,7 @@ def image_pair_candidates(extrinsic, pairing_angle_threshold=30, unique_pairs=Fa
     return pairs, pairs_cnt
 
 @torch.inference_mode()
-def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=256):
+def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128):
 
     xfeat = torch.hub.load('/home/jing_li/.cache/torch/hub/verlab_accelerated_features_main', 
                            'XFeat', source='local', pretrained=True, top_k=max_query_pts)  # TODO: remove the local path
@@ -125,6 +125,9 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
         
         # Match features
         matches_batch = xfeat.match_xfeat_star(images_i, images_j)
+        if len(images_i) == 1:
+            matches_batch = [torch.concatenate([torch.tensor(matches_batch[0], device=images_i.device), 
+                                               torch.tensor(matches_batch[1], device=images_i.device)], dim=-1)]
         matches_list.extend(matches_batch)
 
     num_matches = [len(m) for m in matches_list]
@@ -283,7 +286,8 @@ def pose_optimization(match_outputs,
     corr_points_i = corr_points_i.to(device)
     corr_points_j = corr_points_j.to(device)
     corr_weight_valid = corr_weights.to(device)
-    # corr_weight_valid = corr_weight_valid**(0.5)
+    corr_weight_valid = corr_weight_valid**(0.5)
+    corr_weight_valid /= corr_weight_valid.mean()
 
     params = [{
         "params": [

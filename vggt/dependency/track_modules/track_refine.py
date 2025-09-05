@@ -115,36 +115,46 @@ def refine_track(
         # Extract image patches based on top left corners
         # Feed patches to fine fent for features
         patch_feat = fine_fnet(patches.reshape(B * S * N, C_in, psize, psize))
+
+        patch_feat = patch_feat.reshape(B, S, N, C_out, psize, psize)
+        patch_feat = rearrange(patch_feat, "b s n c p q -> (b n) s c p q")
+
+        patch_query_points = track_frac[:, 0] + pradius
+        patch_query_points = patch_query_points.reshape(B * N, 2).unsqueeze(1)
+
+        fine_pred_track_lists, _, _, query_point_feat = fine_tracker(
+            query_points=patch_query_points, fmaps=patch_feat, iters=fine_iters, return_feat=True
+        )
+
     else:
-        patches = patches.reshape(B * S * N, C_in, psize, psize)
+        batch_n = 128
+        fine_pred_track_lists = []
+        query_point_feat_lists = []
+        patch_feat_list = []
 
-        patch_feat = torch.empty((len(patches), C_out, *patches.shape[2:]), device=patches.device, dtype=patches.dtype)
+        for i in range(0, N, batch_n):
+            num_b = min(i + batch_n, N) - i
+            patch_b = patches[:, i:min(i + batch_n, N)].reshape(B * S * num_b, C_in, psize, psize).clone()
+            patch_feat_b = fine_fnet(patch_b)
+            patch_feat_b = patch_feat_b.reshape(B, S, num_b, C_out, psize, psize)
+            patch_feat_b = rearrange(patch_feat_b, "b s n c p q -> (b n) s c p q")
 
-        for i in range(0, len(patches), chunk):
-            patch_feat[i:i+chunk] = fine_fnet(patches[i:i+chunk])
+            patch_query_points_b = track_frac[:, 0, i:min(i + batch_n, N)] + pradius
+            patch_query_points_b = patch_query_points_b.reshape(B * num_b, 2).unsqueeze(1)
 
-        # patch_feat_list = []
-        # for p in torch.split(patches, chunk):
-        #     patch_feat_list += [fine_fnet(p)]
-        # patch_feat = torch.cat(patch_feat_list, 0)
+            fine_pred_track_lists_b, _, _, query_point_feat_b = fine_tracker(
+                query_points=patch_query_points_b, fmaps=patch_feat_b, iters=fine_iters, return_feat=True
+            )
+            for idx in range(fine_iters):
+                if i == 0:
+                    fine_pred_track_lists.append(fine_pred_track_lists_b[idx].cpu())
+                else:
+                    fine_pred_track_lists[idx] = torch.cat([fine_pred_track_lists[idx], fine_pred_track_lists_b[idx].cpu()], dim=0)
+            query_point_feat_lists.append(query_point_feat_b.cpu())
+            patch_feat_list.append(patch_feat_b.cpu())
 
-    # Refine the coarse tracks by fine_tracker
-    # reshape back to B x S x N x C_out x Psize x Psize
-    patch_feat = patch_feat.reshape(B, S, N, C_out, psize, psize)
-    patch_feat = rearrange(patch_feat, "b s n c p q -> (b n) s c p q")
-
-    # Prepare for the query points for fine tracker
-    # They are relative to the patch left top corner,
-    # instead of the image top left corner now
-    # patch_query_points: N x 1 x 2
-    # only 1 here because for each patch we only have 1 query point
-    patch_query_points = track_frac[:, 0] + pradius
-    patch_query_points = patch_query_points.reshape(B * N, 2).unsqueeze(1)
-
-    # Feed the PATCH query points and tracks into fine tracker
-    fine_pred_track_lists, _, _, query_point_feat = fine_tracker(
-        query_points=patch_query_points, fmaps=patch_feat, iters=fine_iters, return_feat=True
-    )
+        query_point_feat = torch.cat(query_point_feat_lists, dim=0)
+        patch_feat = torch.cat(patch_feat_list, dim=0)
 
     # relative the patch top left
     fine_pred_track = fine_pred_track_lists[-1].clone()
@@ -152,7 +162,7 @@ def refine_track(
     # From (relative to the patch top left) to (relative to the image top left)
     for idx in range(len(fine_pred_track_lists)):
         fine_level = rearrange(fine_pred_track_lists[idx], "(b n) s u v -> b s n u v", b=B, n=N)
-        fine_level = fine_level.squeeze(-2)
+        fine_level = fine_level.squeeze(-2).to(topleft_BSN.device)
         fine_level = fine_level + topleft_BSN
         fine_pred_track_lists[idx] = fine_level
 
@@ -163,6 +173,8 @@ def refine_track(
     score = None
 
     if compute_score:
+        query_point_feat = query_point_feat.to(patch_feat.device)
+        patch_feat = patch_feat.to(patch_feat.device)
         score = compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psize, B, N, S, C_out)
 
     return refined_tracks, score

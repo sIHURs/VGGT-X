@@ -22,7 +22,8 @@ import argparse
 from pathlib import Path
 import trimesh
 import pycolmap
-
+import utils.colmap as colmap_utils
+from datetime import datetime
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_square
@@ -39,6 +40,7 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 # TODO: test with more cases
 # TODO: test different camera types
 
+torch._dynamo.config.accumulated_cache_size_limit = 512
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
@@ -61,11 +63,16 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_VGGT(model, images, dtype, resolution=518):
+def run_VGGT(images, device, dtype, resolution=518):
     # images: [B, 3, H, W]
 
-    assert len(images.shape) == 4
-    assert images.shape[1] == 3
+    # Run VGGT for camera and depth estimation
+    model = VGGT()
+    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    model.eval()
+    model = model.to(device).to(dtype)
+    print(f"Model loaded")
 
     device = next(model.parameters()).device
     # hard-coded to use 518 for VGGT
@@ -82,25 +89,13 @@ def run_VGGT(model, images, dtype, resolution=518):
     images = images.to(device)
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            images = images[None]  # add batch dimension
-            valid_layers = model.depth_head.intermediate_layer_idx
-            if valid_layers[-1] != model.aggregator.aa_block_num - 1:
-                valid_layers.append(model.aggregator.aa_block_num - 1)
-            aggregated_tokens_list, ps_idx = model.aggregator(images, valid_layers)
-            aggregated_tokens_list = [tokens.to(device) if tokens is not None else None for tokens in aggregated_tokens_list]
-
-        # Predict Cameras
-        pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-        # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-        # Predict Depth Maps
-        depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
-
-    extrinsic = extrinsic.squeeze(0).cpu().numpy()
-    intrinsic = intrinsic.squeeze(0).cpu().numpy()
-    depth_map = depth_map.squeeze(0).cpu().numpy()
-    depth_conf = depth_conf.squeeze(0).cpu().numpy()
+        predictions = model(images.to(device, dtype), verbose=True)
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'], images.shape[-2:])
+        extrinsic = extrinsic.squeeze(0).cpu().numpy()
+        intrinsic = intrinsic.squeeze(0).cpu().numpy()
+        depth_map = predictions['depth'].squeeze(0).cpu().numpy()
+        depth_conf = predictions['depth_conf'].squeeze(0).cpu().numpy()
+    
     return extrinsic, intrinsic, depth_map, depth_conf
 
 @torch.inference_mode()
@@ -109,6 +104,7 @@ def demo_fn(args):
     print("Arguments:", vars(args))
 
     # Set seed for reproducibility
+    random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -123,20 +119,23 @@ def demo_fn(args):
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")
 
-    # Run VGGT for camera and depth estimation
-    model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
-    model.eval()
-    model = model.to(device)
-    print(f"Model loaded")
-
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
-    if len(image_path_list) == 0:
-        raise ValueError(f"No images found in {image_dir}")
-    base_image_path_list = [os.path.basename(path) for path in image_path_list]
+
+    if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
+        print("Using order of ground truth images from COLMAP sparse reconstruction")
+        images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
+        images_gt_keys = list(images_gt.keys())
+        random.shuffle(images_gt_keys)
+        images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
+        image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
+        base_image_path_list = [os.path.basename(path) for path in image_path_list]
+    else:
+        images_gt_updated = None
+        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
+        if len(image_path_list) == 0:
+            raise ValueError(f"No images found in {image_dir}")
+        base_image_path_list = [os.path.basename(path) for path in image_path_list]
     if args.total_frame_num is not None:
         image_path_list = image_path_list[:args.total_frame_num]
         base_image_path_list = base_image_path_list[:args.total_frame_num]
@@ -155,9 +154,25 @@ def demo_fn(args):
     original_coords = original_coords.to(device)
     print(f"Loaded {len(images)} images from {image_dir}")
 
+    torch.cuda.reset_peak_memory_stats()
+    start_time = datetime.now()
+
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype, vggt_fixed_resolution)
+
+    inverse_idx = [images_gt_keys.index(key) for key in list(images_gt.keys())]
+    extrinsic = extrinsic[inverse_idx]
+    intrinsic = intrinsic[inverse_idx]
+    depth_map = depth_map[inverse_idx]
+    depth_conf = depth_conf[inverse_idx]
+    images = images[inverse_idx]
+    original_coords = original_coords[inverse_idx]
+    images_gt_keys = list(images_gt.keys())
+    images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
+    image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
+    base_image_path_list = [os.path.basename(path) for path in image_path_list]
+
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
     images = images.to(device)
 
@@ -166,7 +181,6 @@ def demo_fn(args):
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
-        start = datetime.datetime.now()
         with torch.cuda.amp.autocast(dtype=dtype):
             # Predicting Tracks
             # Using VGGSfM tracker instead of VGGT tracker for efficiency
@@ -185,15 +199,13 @@ def demo_fn(args):
                 keypoint_extractor="aliked+sp",
                 fine_tracking=args.fine_tracking,
             )
-
-            torch.cuda.empty_cache()
-
-        end = datetime.datetime.now()
-        print(f"Track prediction took {end - start} seconds")
         
         # rescale the intrinsic matrix from 518 to 1024
         intrinsic[:, :2, :] *= scale
         track_mask = pred_vis_scores > args.vis_thresh
+
+        end_time = datetime.now()
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
         # TODO: radial distortion, iterative BA, masks
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
@@ -218,6 +230,9 @@ def demo_fn(args):
 
         reconstruction_resolution = img_load_resolution
     else:
+        end_time = datetime.now()
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+
         conf_thres_value = 5  # hard-coded to 5
         max_points_for_colmap = 100000 * (args.total_frame_num // 25)  # randomly sample 3D points
         shared_camera = False  # in the feedforward manner, we do not support shared camera
@@ -277,7 +292,7 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
-    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_vggt_full", os.path.basename(args.scene_dir))
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}_ba", os.path.basename(args.scene_dir))
     os.makedirs(target_scene_dir, exist_ok=True)
     for item in os.listdir(args.scene_dir):
         if item != "sparse":
@@ -297,6 +312,12 @@ def demo_fn(args):
 
     # Save point cloud for fast visualization
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
+
+    result_file = os.path.join(target_scene_dir, "vggt_results.txt")
+    with open(result_file, "w") as f:
+        f.write(f"Image Count: {len(images_gt_updated)}\n")
+        f.write(f"Inference Time: {(end_time - start_time).total_seconds()}\n")
+        f.write(f"Peak Memory Usage (MB): {max_memory}\n")
 
     return True
 

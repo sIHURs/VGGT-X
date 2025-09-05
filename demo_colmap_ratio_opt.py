@@ -32,7 +32,7 @@ from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
-from vggt.dependency.np_to_pycolmap import  batch_np_matrix_to_pycolmap_wo_track
+from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track
 
 # TODO: add support for masks
 # TODO: add iterative BA
