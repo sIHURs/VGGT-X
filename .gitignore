@@ -156,3 +156,5 @@ notebooks/track_visuals*
 *.html
 notebooks/*.pt
 notebooks/*.npz
+notebooks/*.ply
+notebooks/sparse

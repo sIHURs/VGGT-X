@@ -296,7 +296,7 @@ def demo_fn(args):
     target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}{args.post_fix}", os.path.basename(args.scene_dir))
     os.makedirs(target_scene_dir, exist_ok=True)
     for item in os.listdir(args.scene_dir):
-        if item != "sparse":
+        if item != "sparse" and not item.endswith("results.txt"):
             src = os.path.join(args.scene_dir, item)
             dst = os.path.join(target_scene_dir, item)
             if os.path.isdir(src):
