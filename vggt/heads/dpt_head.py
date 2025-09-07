@@ -243,7 +243,7 @@ class DPTHead(nn.Module):
 
         # Fuse features from multiple layers.
         out = self.scratch_forward(out)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         # Interpolate fused output to match target image resolution.
         out = custom_interpolate(
             out,
@@ -251,7 +251,7 @@ class DPTHead(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         if self.pos_embed:
             self._apply_pos_embed(out, W, H)
@@ -271,7 +271,7 @@ class DPTHead(nn.Module):
             i1 = min(i0 + mini_batch, out.shape[0])
             out1[i0:i1] = self.scratch.output_conv2(out[i0:i1].float().contiguous())
         out = out1
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
 
@@ -492,7 +492,7 @@ class FeatureFusionBlock(nn.Module):
             modifier = {"size": size}
 
         output = custom_interpolate(output, **modifier, mode="bilinear", align_corners=self.align_corners)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         output = self.out_conv(output)
 
         return output
@@ -508,7 +508,7 @@ def custom_interpolate(
     """
     Custom interpolate to avoid INT_MAX issues in nn.functional.interpolate.
     """
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
     if size is None:
         size = (int(x.shape[-2] * scale_factor), int(x.shape[-1] * scale_factor))

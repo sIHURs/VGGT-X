@@ -152,12 +152,14 @@ def demo_fn(args):
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
-    conf_thres_value = 1  # hard-coded to 1 for easier reconstruction
-    max_points_for_colmap = 500000  # randomly sample 3D points
-    shared_camera = False  # in the feedforward manner, we do not support shared camera
-    camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
+    import pycolmap
+    reconstruction = pycolmap.Reconstruction()
+    reconstruction.read(os.path.join(target_scene_dir, "sparse/0"))
+    os.makedirs(os.path.join(target_scene_dir, "sparse_vanilla/0"), exist_ok=True)
+    reconstruction.write(os.path.join(target_scene_dir, "sparse_vanilla/0"))  # save copy
 
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
+
         pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
         # max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
 
@@ -220,14 +222,16 @@ def demo_fn(args):
                 pred_se3[:, 3, :3] = torch.tensor(extrinsic_ba[:, :3, 3], device=device)
 
                 points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic_ba, intrinsic_ba)
+                extrinsic = extrinsic_ba
+                intrinsic = intrinsic_ba
             else:
                 points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
             
             auc_results, _, c, R, t = evaluate_auc(pred_se3, gt_se3, device, return_aligned=True)
-            points_3d = c * (points_3d @ R.T) + t.T
+            points_3d_transformed = c * (points_3d @ R.T) + t.T
             
             pcd_results = evaluate_pcd(
-                pcd_gt, points_3d, depth_conf, images,
+                pcd_gt, points_3d_transformed, depth_conf, images,
                 images_gt_updated, original_coords, 
                 img_load_resolution, conf_thresh=1.5
             )
@@ -249,6 +253,64 @@ def demo_fn(args):
         points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
         points_3d_gt = None
         points_rgb_gt = None
+    
+    conf_thres_value = 1  # hard-coded to 1 for easier reconstruction
+    max_points_for_colmap = 500000  # randomly sample 3D points
+    shared_camera = False  # in the feedforward manner, we do not support shared camera
+    camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
+
+    image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
+    num_frames, height, width, _ = points_3d.shape
+
+    points_rgb = F.interpolate(
+        images, size=(depth_map.shape[1], depth_map.shape[2]), mode="bilinear", align_corners=False
+    )
+    points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+    points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+    # (S, H, W, 3), with x, y coordinates and frame indices
+    points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+    conf_mask = depth_conf >= conf_thres_value
+    # at most writing max_points_for_colmap 3d points to colmap reconstruction object
+    conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+    points_3d = points_3d[conf_mask]
+    points_xyf = points_xyf[conf_mask]
+    points_rgb = points_rgb[conf_mask]
+
+    inverse_idx = [images_gt_keys.index(key) for key in list(images_gt.keys())]
+    base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
+
+    print("Converting to COLMAP format")
+    reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+        points_3d,
+        points_xyf,
+        points_rgb,
+        extrinsic[inverse_idx],
+        intrinsic[inverse_idx],
+        image_size,
+        shared_camera=shared_camera,
+        camera_type=camera_type,
+    )
+
+    reconstruction_resolution = (depth_map.shape[2], depth_map.shape[1])
+
+    reconstruction = colmap_utils.rename_colmap_recons_and_rescale_camera(
+        reconstruction,
+        base_image_path_list_inv,
+        original_coords.cpu().numpy()[inverse_idx],
+        img_size=reconstruction_resolution,
+        shift_point2d_to_original_res=True,
+        shared_camera=False,
+    )
+
+    print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
+    sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")
+    os.makedirs(sparse_reconstruction_dir, exist_ok=True)
+    reconstruction.write(sparse_reconstruction_dir)
+
+    # Save point cloud for fast visualization
+    trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
     return True
 

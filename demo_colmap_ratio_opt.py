@@ -106,9 +106,18 @@ def demo_fn(args):
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
 
+    image_dir = os.path.join(args.scene_dir, "images")
+    if args.total_frame_num is None:
+        args.total_frame_num = len(os.listdir(image_dir))
+
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
         print("Using order of ground truth images from COLMAP sparse reconstruction")
         images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
+
+        if args.total_frame_num > len(images_gt):
+            raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
+        images_gt = dict(list(images_gt.items())[: args.total_frame_num])
+
         images_gt_keys = list(images_gt.keys())
         random.shuffle(images_gt_keys)
         images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
@@ -116,13 +125,10 @@ def demo_fn(args):
         base_image_path_list = [os.path.basename(path) for path in image_path_list]
     else:
         images_gt_updated = None
-        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
+        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))[:args.total_frame_num]
         if len(image_path_list) == 0:
             raise ValueError(f"No images found in {image_dir}")
         base_image_path_list = [os.path.basename(path) for path in image_path_list]
-    if args.total_frame_num is not None:
-        image_path_list = image_path_list[:args.total_frame_num]
-        base_image_path_list = base_image_path_list[:args.total_frame_num]
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
@@ -203,10 +209,10 @@ def demo_fn(args):
             camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
             camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
             c, R, t = umeyama(camera_centers_pred.T, camera_centers_gt.T)
-            points_3d = c * (points_3d @ R.T) + t.T
+            points_3d_transformed = c * (points_3d @ R.T) + t.T
             
             pcd_results = evaluate_pcd(
-                pcd_gt, points_3d, depth_conf, images,
+                pcd_gt, points_3d_transformed, depth_conf, images,
                 images_gt_updated, original_coords, 
                 img_load_resolution, conf_thresh=1.5
             )

@@ -122,10 +122,19 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
+    if args.total_frame_num is None:
+        args.total_frame_num = len(os.listdir(image_dir))
+    if args.query_frame_num is None:
+        args.query_frame_num = args.total_frame_num // 2
 
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
         print("Using order of ground truth images from COLMAP sparse reconstruction")
         images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
+
+        if args.total_frame_num > len(images_gt):
+            raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
+        images_gt = dict(list(images_gt.items())[: args.total_frame_num])
+
         images_gt_keys = list(images_gt.keys())
         random.shuffle(images_gt_keys)
         images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
@@ -133,18 +142,10 @@ def demo_fn(args):
         base_image_path_list = [os.path.basename(path) for path in image_path_list]
     else:
         images_gt_updated = None
-        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))
+        image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))[:args.total_frame_num]
         if len(image_path_list) == 0:
             raise ValueError(f"No images found in {image_dir}")
         base_image_path_list = [os.path.basename(path) for path in image_path_list]
-    if args.total_frame_num is not None:
-        image_path_list = image_path_list[:args.total_frame_num]
-        base_image_path_list = base_image_path_list[:args.total_frame_num]
-    else:
-        args.total_frame_num = len(image_path_list)
-    
-    if args.query_frame_num is None:
-        args.query_frame_num = args.total_frame_num // 2
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
@@ -205,9 +206,6 @@ def demo_fn(args):
         intrinsic[:, :2, :] *= scale
         track_mask = pred_vis_scores > args.vis_thresh
 
-        end_time = datetime.now()
-        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
-
         # TODO: radial distortion, iterative BA, masks
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
             points_3d,
@@ -230,6 +228,9 @@ def demo_fn(args):
         pycolmap.bundle_adjustment(reconstruction, ba_options)
 
         reconstruction_resolution = img_load_resolution
+
+        end_time = datetime.now()
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
     else:
         end_time = datetime.now()
         max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
@@ -302,9 +303,11 @@ def demo_fn(args):
             if os.path.isdir(src):
                 os.makedirs(dst, exist_ok=True)
                 for file in os.listdir(src):
-                    os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
+                    if not os.path.exists(os.path.join(dst, file)):
+                        os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
             else:
-                os.symlink(os.path.abspath(src), os.path.abspath(dst))
+                if not os.path.exists(dst):
+                    os.symlink(os.path.abspath(src), os.path.abspath(dst))
 
     print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
     sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")
