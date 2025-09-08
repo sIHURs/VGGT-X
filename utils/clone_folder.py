@@ -13,6 +13,9 @@ if __name__ == "__main__":
     for item in os.listdir(args.src_dir):
         src = os.path.join(args.src_dir, item)
         dst = os.path.join(args.tgt_dir, item)
+        if os.path.exists(dst):
+            continue
+
         if os.path.isdir(src):
             os.makedirs(dst, exist_ok=True)
             for file in os.listdir(src):

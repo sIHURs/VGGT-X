@@ -173,6 +173,10 @@ def demo_fn(args):
     shared_camera = False  # in the feedforward manner, we do not support shared camera
     camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
+    c = 2.5  # scale factor for better reconstruction, hard-coded here
+    extrinsic[:, :3, 3] *= c
+    depth_map *= c
+
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
         pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
         # max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
@@ -193,23 +197,18 @@ def demo_fn(args):
             pred_se3[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
             pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
 
+            auc_results, pred_se3_aligned, c, R, t = evaluate_auc(pred_se3, gt_se3, device, return_aligned=True)
+
             # align prediction to gt points, yielding lower results
-            c = 2.5  # scale factor for better reconstruction, hard-coded here
             # extrinsic[:, :3, :3] = pred_se3_aligned[:, :3, :3].cpu().numpy()
             # extrinsic[:, :3, 3] = pred_se3_aligned[:, 3, :3].cpu().numpy()
-            extrinsic[:, :3, 3] *= c
-            depth_map *= c
+            # depth_map *= c
+            
             points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
-            # auc_results = evaluate_auc(pred_se3, gt_se3, device)
-            pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
-            auc_results = evaluate_auc(pred_se3, gt_se3, device)
-
             # align gt points to prediction
-            camera_centers_gt = - (gt_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ gt_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-            camera_centers_pred = - (pred_se3[:, :3, :3].cpu().numpy().transpose(0, 2, 1) @ pred_se3[:, 3, :3][..., None].cpu().numpy()).squeeze(-1)
-            c, R, t = umeyama(camera_centers_pred.T, camera_centers_gt.T)
             points_3d_transformed = c * (points_3d @ R.T) + t.T
+            # points_3d_transformed = points_3d
             
             pcd_results = evaluate_pcd(
                 pcd_gt, points_3d_transformed, depth_conf, images,
@@ -281,6 +280,7 @@ def demo_fn(args):
             if j not in indexes_i:
                 single_mask = (corr_weights[j] > 0.1)
                 conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
+        randomly_limit_trues(conf_mask, max_points_for_colmap)
     else:
         conf_mask = depth_conf >= conf_thres_value
         # at most writing max_points_for_colmap 3d points to colmap reconstruction object
@@ -335,12 +335,6 @@ def demo_fn(args):
 
     # Save point cloud for fast visualization
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
-
-    if points_3d_gt is not None and points_rgb_gt is not None and args.overwrite_pcd:
-        # Save ground truth point cloud for comparison
-        print("Overwriting point cloud with ground truth points")
-        colmap_utils.write_points3D_binary(pcd_gt, os.path.join(sparse_reconstruction_dir, "points3D.bin"))
-        trimesh.PointCloud(points_3d_gt, colors=points_rgb_gt).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
     return True
 
