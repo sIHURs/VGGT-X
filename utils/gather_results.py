@@ -3,26 +3,29 @@ import pandas as pd
 import numpy as np
 import argparse
 
-def gather_results(output_dir, format_float=False):
+def gather_results(output_dir, format_float=False, result_filename='results.txt'):
     data = []
 
     # Walk through subdirectories
     for subdir, _, files in os.walk(output_dir):
-        if 'vggt_results.txt' in files:
-            result_path = os.path.join(subdir, 'vggt_results.txt')
+        if result_filename in files:
+            result_path = os.path.join(subdir, result_filename)
             with open(result_path, 'r') as f:
-                lines = f.readlines()
+                contents = f.read()
+                # Split on commas and parse key-value pairs
+                items = contents.strip().split(',')
                 metrics = {}
-                for line in lines:
-                    line = line.strip()
-                    if ':' in line:
-                        key, value = line.split(':', 1)
+                for item in items:
+                    if ':' in item:
+                        key, value = item.split(':', 1)
                         try:
                             metrics[key.strip()] = float(value.strip())
                         except ValueError:
                             metrics[key.strip()] = value.strip()
                 metrics['folder'] = os.path.basename(subdir)
                 data.append(metrics)
+        else:
+            print(f"Warning: {result_filename} not found in {subdir}")
 
     # Convert to DataFrame
     df = pd.DataFrame(data)
@@ -50,7 +53,8 @@ def gather_results(output_dir, format_float=False):
         df_final[numeric_cols] = df_final[numeric_cols].applymap(lambda x: float(f"{x:.4g}") if pd.notnull(x) else x)
 
     # Save to CSV in the output_dir
-    output_csv = os.path.join(output_dir, 'aggregated_results.csv')
+    file_name = result_filename.split('.')[0]
+    output_csv = os.path.join(output_dir, f'aggregated_{file_name}.csv')
     df_final.to_csv(output_csv, index=False)
     print(f"Saved aggregated results with summary to {output_csv}")
 
@@ -58,7 +62,8 @@ def gather_results(output_dir, format_float=False):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Aggregate results from results.txt files.')
     parser.add_argument('output_dir', type=str, help='Directory containing subfolders with results.txt files')
+    parser.add_argument('--result_filename', type=str, default='results.txt', help='Name of the results file to look for in subfolders')
     parser.add_argument('--format_float', action='store_true', help='Format floating numbers to 4 significant digits')
     args = parser.parse_args()
 
-    gather_results(args.output_dir, format_float=args.format_float)
+    gather_results(args.output_dir, format_float=args.format_float, result_filename=args.result_filename)

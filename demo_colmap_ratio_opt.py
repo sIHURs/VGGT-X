@@ -168,7 +168,8 @@ def demo_fn(args):
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
-    conf_thres_value = 1  # hard-coded to 1 for easier reconstruction
+    conf_thres_value = np.percentile(depth_conf, 0.5) # hard-coded to 1 for easier reconstruction
+    # conf_thres_value = 5.0
     max_points_for_colmap = 500000  # randomly sample 3D points
     shared_camera = False  # in the feedforward manner, we do not support shared camera
     camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
@@ -213,7 +214,7 @@ def demo_fn(args):
             pcd_results = evaluate_pcd(
                 pcd_gt, points_3d_transformed, depth_conf, images,
                 images_gt_updated, original_coords, 
-                img_load_resolution, conf_thresh=1.5
+                img_load_resolution, conf_thresh=conf_thres_value
             )
 
             result_file = os.path.join(target_scene_dir, "vggt_results.txt")
@@ -221,6 +222,10 @@ def demo_fn(args):
                 f.write(f"Image Count: {len(images_gt_updated)}\n")
                 f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']}\n")
                 f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']}\n")
+                f.write(f"Racc_5: {auc_results['Racc_5']}\n")
+                f.write(f"Racc_15: {auc_results['Racc_15']}\n")
+                f.write(f"Tacc_5: {auc_results['Tacc_5']}\n")
+                f.write(f"Tacc_15: {auc_results['Tacc_15']}\n")
                 f.write(f"AUC at 30 degrees: {auc_results['Auc_30']}\n")
                 f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']}\n")
                 f.write(f"Completeness Mean: {pcd_results['completeness_mean']}\n")
@@ -280,7 +285,8 @@ def demo_fn(args):
             if j not in indexes_i:
                 single_mask = (corr_weights[j] > 0.1)
                 conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
-        randomly_limit_trues(conf_mask, max_points_for_colmap)
+        conf_mask = conf_mask & (depth_conf >= conf_mask)
+        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
     else:
         conf_mask = depth_conf >= conf_thres_value
         # at most writing max_points_for_colmap 3d points to colmap reconstruction object
@@ -290,7 +296,7 @@ def demo_fn(args):
     points_xyf = points_xyf[conf_mask]
     points_rgb = points_rgb[conf_mask]
 
-    inverse_idx = [images_gt_keys.index(key) for key in list(images_gt.keys())]
+    inverse_idx = [images_gt_keys.index(key) for key in sorted(list(images_gt.keys()))]
     base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
 
     print("Converting to COLMAP format")
@@ -324,9 +330,11 @@ def demo_fn(args):
             if os.path.isdir(src):
                 os.makedirs(dst, exist_ok=True)
                 for file in os.listdir(src):
-                    os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
+                    if not os.path.exists(os.path.join(dst, file)):
+                        os.symlink(os.path.abspath(os.path.join(src, file)), os.path.abspath(os.path.join(dst, file)))
             else:
-                os.symlink(os.path.abspath(src), os.path.abspath(dst))
+                if not os.path.exists(dst):
+                    os.symlink(os.path.abspath(src), os.path.abspath(dst))
 
     print(f"Saving reconstruction to {target_scene_dir}/sparse/0")
     sparse_reconstruction_dir = os.path.join(target_scene_dir, "sparse/0")

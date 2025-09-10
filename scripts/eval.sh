@@ -11,24 +11,27 @@ declare -a scenes=(
     "data/MipNeRF360/stump"
 )
 
-dir="data/MipNeRF360"
+tgt_dir="data/MipNeRF360_vggt_opt_lr_fix_avg_scale_match_pcd_gamma_rand_order"
+gt_dir="data/MipNeRF360"
 
-for data_path in $dir/*; do
+for data_path in $tgt_dir/*; do
 # for data_path in "${scenes[@]}"; do
-    while true; do
+    while [ -d "$data_path" ]; do
         gpu_id=$(get_available_gpu)
         if [[ -n $gpu_id ]]; then
             echo "GPU $gpu_id is available. Start evaluating '$data_path'"
-            CUDA_VISIBLE_DEVICES=$gpu_id python eval_pose_pcd.py --data_path $data_path &
+            CUDA_VISIBLE_DEVICES=$gpu_id python utils/evaluate_pose_bin.py \
+                --data_dir_pred $data_path \
+                --data_dir_gt $gt_dir/$(basename $data_path) &
             # Allow some time for the process to initialize and potentially use GPU memory
-            sleep 60
+            sleep 15
             break
         else
             echo "No GPU available at the moment. Retrying in 2 minute."
-            sleep 60
+            sleep 15
         fi
     done
 done
 wait
 
-python utils/gather_results.py $dir --format_float
+python utils/gather_results.py $tgt_dir --format_float --result_filename pose_results.txt
