@@ -22,6 +22,7 @@ from pathlib import Path
 import trimesh
 import pycolmap
 import utils.colmap as colmap_utils
+import utils.opt as opt_utils
 from datetime import datetime
 from utils.umeyama import umeyama
 from utils.metric_torch import evaluate_auc, evaluate_pcd
@@ -75,6 +76,7 @@ def parse_args():
     parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
     parser.add_argument("--max_query_pts", type=int, default=None, help="Maximum number of query points")
+    parser.add_argument("--gt_intr", action="store_true", default=False, help="Replace the estimated intrinsic with ground truth intrinsics")
     parser.add_argument(
         "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
     )
@@ -105,8 +107,6 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-
-    image_dir = os.path.join(args.scene_dir, "images")
     if args.total_frame_num is None:
         args.total_frame_num = len(os.listdir(image_dir))
 
@@ -116,7 +116,7 @@ def demo_fn(args):
 
         if args.total_frame_num > len(images_gt):
             raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
-        images_gt = dict(list(images_gt.items())[: args.total_frame_num])
+        images_gt = dict(list(images_gt.items())[:args.total_frame_num])
 
         images_gt_keys = list(images_gt.keys())
         random.shuffle(images_gt_keys)
@@ -146,20 +146,19 @@ def demo_fn(args):
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype)
     
     images = images.to(device)
-
+    
+    if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
+        print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
+        match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
+    else:
+        if args.max_query_pts is None:
+            args.max_query_pts = 4096 if len(images) < 500 else 2048
+        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+        match_outputs["original_width"] = images.shape[-1]
+        match_outputs["original_height"] = images.shape[-2]
+        torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
+        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
     if args.use_opt:
-        import utils.opt as opt_utils
-        if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
-            print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
-            match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
-        else:
-            if args.max_query_pts is None:
-                args.max_query_pts = 4096 if len(images) < 500 else 2048
-            match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
-            match_outputs["original_width"] = images.shape[-1]
-            match_outputs["original_height"] = images.shape[-2]
-            torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
-            print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
         extrinsic, intrinsic = opt_utils.pose_optimization(
             match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
@@ -233,13 +232,9 @@ def demo_fn(args):
                 f.write(f"Inference Time: {(end_time - start_time).total_seconds()}\n")
                 f.write(f"Peak Memory Usage (MB): {max_memory}\n")
             
-            points_3d_gt = np.array([point.xyz for point in pcd_gt.values()])
-            points_rgb_gt = np.array([point.rgb for point in pcd_gt.values()])
     else:
         print("No ground truth points3D.bin found, using random sampling")
         points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
-        points_3d_gt = None
-        points_rgb_gt = None
 
     # save depth_map and depth_conf as .npy files
     target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
