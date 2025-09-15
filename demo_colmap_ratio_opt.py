@@ -52,6 +52,7 @@ def run_VGGT(images, device, dtype):
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
     model = model.to(device).to(dtype)
+    model.track_head = None  # we do not need tracking head for reconstruction
     print(f"Model loaded")
 
     with torch.no_grad():
@@ -167,7 +168,8 @@ def demo_fn(args):
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
-    conf_thres_value = np.percentile(depth_conf, 0.5) # hard-coded to 1 for easier reconstruction
+    conf_thres_value = np.percentile(depth_conf, 0.5)
+    print(f"Using confidence threshold: {conf_thres_value}")
     # conf_thres_value = 5.0
     max_points_for_colmap = 500000  # randomly sample 3D points
     shared_camera = False  # in the feedforward manner, we do not support shared camera
@@ -213,46 +215,46 @@ def demo_fn(args):
             pcd_results = evaluate_pcd(
                 pcd_gt, points_3d_transformed, depth_conf, images,
                 images_gt_updated, original_coords, 
-                img_load_resolution, conf_thresh=conf_thres_value
+                img_load_resolution, conf_thresh=1.5 if depth_conf.max() > 1.5 else conf_thres_value,
             )
 
             result_file = os.path.join(target_scene_dir, "vggt_results.txt")
             with open(result_file, "w") as f:
-                f.write(f"Image Count: {len(images_gt_updated)}\n")
-                f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']}\n")
-                f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']}\n")
-                f.write(f"Racc_5: {auc_results['Racc_5']}\n")
-                f.write(f"Racc_15: {auc_results['Racc_15']}\n")
-                f.write(f"Tacc_5: {auc_results['Tacc_5']}\n")
-                f.write(f"Tacc_15: {auc_results['Tacc_15']}\n")
-                f.write(f"AUC at 30 degrees: {auc_results['Auc_30']}\n")
-                f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']}\n")
-                f.write(f"Completeness Mean: {pcd_results['completeness_mean']}\n")
-                f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']}\n")
-                f.write(f"Inference Time: {(end_time - start_time).total_seconds()}\n")
-                f.write(f"Peak Memory Usage (MB): {max_memory}\n")
+                f.write(f"Image Count: {len(images_gt_updated)},\n")
+                f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']},\n")
+                f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']},\n")
+                f.write(f"Racc_5: {auc_results['Racc_5']},\n")
+                f.write(f"Racc_15: {auc_results['Racc_15']},\n")
+                f.write(f"Tacc_5: {auc_results['Tacc_5']},\n")
+                f.write(f"Tacc_15: {auc_results['Tacc_15']},\n")
+                f.write(f"AUC at 30 degrees: {auc_results['Auc_30']},\n")
+                f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']},\n")
+                f.write(f"Completeness Mean: {pcd_results['completeness_mean']},\n")
+                f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']},\n")
+                f.write(f"Inference Time: {(end_time - start_time).total_seconds()},\n")
+                f.write(f"Peak Memory Usage (MB): {max_memory},\n")
             
     else:
         print("No ground truth points3D.bin found, using random sampling")
         points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # save depth_map and depth_conf as .npy files
-    target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
-    target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
-    os.makedirs(target_depth_dir, exist_ok=True)
-    os.makedirs(target_conf_dir, exist_ok=True)
+    # target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
+    # target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
+    # os.makedirs(target_depth_dir, exist_ok=True)
+    # os.makedirs(target_conf_dir, exist_ok=True)
 
-    for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
-        inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
-        normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
-        depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
-        depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
-        np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
-        np.save(depth_conf_path, depth_conf[idx].squeeze())
+    # for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+    #     inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
+    #     normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
+    #     depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
+    #     depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
+    #     np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
+    #     np.save(depth_conf_path, depth_conf[idx].squeeze())
     
-    print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
-    if args.save_depth_only:
-        return True
+    # print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
+    # if args.save_depth_only:
+    #     return True
 
     image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
     num_frames, height, width, _ = points_3d.shape

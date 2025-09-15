@@ -250,7 +250,7 @@ def vggt_extract_matches(model, extrinsic, intrinsic, depth_conf, track_feats, b
     return output_dict
 
 @torch.inference_mode()
-def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128, err_range=60):
+def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128, err_range=20):
 
     xfeat = torch.hub.load('/home/jing_li/.cache/torch/hub/verlab_accelerated_features_main', 
                            'XFeat', source='local', pretrained=True, top_k=max_query_pts)  # TODO: remove the local path
