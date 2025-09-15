@@ -101,15 +101,23 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
 
-        if self.track_head is not None and query_points is not None:
+        if self.track_head is not None:
             if verbose:
                 print("Running track head")
-            track_list, vis, conf = self.track_head(
-                aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
-            )
-            predictions["track"] = track_list[-1]  # track of the last iteration
-            predictions["vis"] = vis
-            predictions["conf"] = conf
+            if query_points is not None:
+                track_list, vis, conf = self.track_head(
+                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
+                )
+                predictions["track"] = track_list[-1]  # track of the last iteration
+                predictions["vis"] = vis
+                predictions["conf"] = conf
+                predictions["track_feats"] = None
+            else:
+                track_feats = self.track_head.feature_extractor(aggregated_tokens_list, images, patch_start_idx)
+                predictions["track"] = None
+                predictions["vis"] = None
+                predictions["conf"] = None
+                predictions["track_feats"] = track_feats
 
         if not self.training:
             predictions["images"] = images.float()  # store the images for visualization during inference

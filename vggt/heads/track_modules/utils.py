@@ -104,10 +104,10 @@ def get_2d_embedding(xy: torch.Tensor, C: int, cat_coords: bool = True) -> torch
 
     x = xy[:, :, 0:1]
     y = xy[:, :, 1:2]
-    div_term = (torch.arange(0, C, 2, device=xy.device, dtype=torch.float32) * (1000.0 / C)).reshape(1, 1, int(C / 2))
+    div_term = (torch.arange(0, C, 2, device=xy.device, dtype=xy.dtype) * (1000.0 / C)).reshape(1, 1, int(C / 2))
 
-    pe_x = torch.zeros(B, N, C, device=xy.device, dtype=torch.float32)
-    pe_y = torch.zeros(B, N, C, device=xy.device, dtype=torch.float32)
+    pe_x = torch.zeros(B, N, C, device=xy.device, dtype=xy.dtype)
+    pe_y = torch.zeros(B, N, C, device=xy.device, dtype=xy.dtype)
 
     pe_x[:, :, 0::2] = torch.sin(x * div_term)
     pe_x[:, :, 1::2] = torch.cos(x * div_term)

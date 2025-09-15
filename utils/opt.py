@@ -98,7 +98,159 @@ def image_pair_candidates(extrinsic, pairing_angle_threshold=30, unique_pairs=Fa
     return pairs, pairs_cnt
 
 @torch.inference_mode()
-def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128):
+def vggt_extract_matches(model, extrinsic, intrinsic, depth_conf, track_feats, base_image_path_list, 
+                         max_query_pts=4096, batch_size=16, conf_threshold=None, device='cuda', dtype=torch.bfloat16):
+    
+    track_feats = track_feats.to(device)
+    pairs, pairs_cnt = image_pair_candidates(extrinsic, 30, unique_pairs=True)
+    print("Total candidate image pairs found: ", pairs_cnt)
+
+    indexes_i = list(range(len(base_image_path_list)-1))  # except for the last image 
+    # indexes_j = [np.random.choice(pairs[idx_i], min(20, len(pairs[idx_i])), replace=False) for idx_i in indexes_i]
+    indexes_j = [pairs[idx_i] for idx_i in indexes_i]
+    indexes_i_updated = []
+    indexes_j_updated = []
+
+    if conf_threshold is None:
+        conf_threshold = np.percentile(depth_conf, 50)
+        print(f"Confidence threshold is set to {conf_threshold:.4f}")
+    score_threshold = conf_threshold * 0.05
+    matches_list = []
+
+    for i in tqdm(range(0, len(indexes_i)), desc="Matching image pairs..."):
+        index_j_updated = []
+
+        for j in range(0, len(indexes_j[i]), batch_size):
+            end_j = min(j + batch_size, len(indexes_j[i]))
+            index = [i] + indexes_j[i][j:end_j]
+            masks_src = (depth_conf[i:i+1] > conf_threshold)
+            if not masks_src.any():
+                continue
+
+            valid_index = np.where(masks_src.flatten())[0].tolist()
+            mark_points = np.random.choice(valid_index, min(max_query_pts, len(valid_index)), replace=False).tolist()
+
+            query_points_list = []
+            for point in mark_points:
+                x, y = divmod(point, depth_conf.shape[1])
+                query_points_list.append([x, y])
+            query_points = torch.FloatTensor(query_points_list).to(device, dtype)
+
+            track_list, vis_score, conf_score = model.track_head.tracker(query_points=query_points[None], 
+                                                                        fmaps=track_feats[index][None], 
+                                                                        iters=model.track_head.iters)
+            
+            valid_track_score_mask = (conf_score > score_threshold) & (vis_score > score_threshold)
+            for k in range(1, len(index)):
+                track_src = track_list[-1][0, 0]
+                track_tgt = track_list[-1][0, k]
+                track_pair = torch.cat([track_src, track_tgt], dim=-1)
+                track_mask = valid_track_score_mask[0, k] & valid_track_score_mask[0, 0]
+                if torch.any(track_mask):
+                    matches_list.append(track_pair[track_mask])
+                    index_j_updated.append(indexes_j[i][j+k-1])
+        
+        if len(index_j_updated) > 0:
+            indexes_i_updated.append([i]*len(index_j_updated))
+            indexes_j_updated.append(index_j_updated)
+
+    num_matches = [len(m) for m in matches_list]
+
+    indexes_i_expanded = []
+    indexes_j_expanded = []
+
+    indexes_i = np.concatenate(indexes_i_updated).tolist()
+    indexes_j = np.concatenate(indexes_j_updated).tolist()
+
+    for idx, n in enumerate(num_matches):
+        indexes_i_expanded.append(np.array([indexes_i[idx]] * n, dtype=np.int64))
+        indexes_j_expanded.append(np.array([indexes_j[idx]] * n, dtype=np.int64))
+    indexes_i_expanded = np.concatenate(indexes_i_expanded)
+    indexes_j_expanded = np.concatenate(indexes_j_expanded)
+
+    image_names_i = np.array(base_image_path_list)[indexes_i_expanded]
+    image_names_j = np.array(base_image_path_list)[indexes_j_expanded]
+
+    corr_points_i = torch.cat([matches_list[k][:, :2] for k in range(len(matches_list))], dim=0).cpu()
+    corr_points_j = torch.cat([matches_list[k][:, 2:] for k in range(len(matches_list))], dim=0).cpu()
+
+    intrinsic_i = np.zeros((corr_points_i.shape[0], 4, 4), dtype=np.float32)
+    intrinsic_j = np.zeros((corr_points_j.shape[0], 4, 4), dtype=np.float32)
+    intrinsic_i[:, :3, :3] = intrinsic[indexes_i_expanded]
+    intrinsic_j[:, :3, :3] = intrinsic[indexes_j_expanded]
+    intrinsic_i[:, 3, 3] = 1.0
+    intrinsic_j[:, 3, 3] = 1.0
+
+    extrinsic_i = np.zeros((corr_points_i.shape[0], 4, 4), dtype=np.float32)
+    extrinsic_j = np.zeros((corr_points_j.shape[0], 4, 4), dtype=np.float32)
+    extrinsic_i[:, :3, :4] = extrinsic[indexes_i_expanded]
+    extrinsic_j[:, :3, :4] = extrinsic[indexes_j_expanded]
+    extrinsic_i[:, 3, 3] = 1.0
+    extrinsic_j[:, 3, 3] = 1.0
+
+    device = corr_points_i.device
+
+    intrinsic_i_tensor = torch.FloatTensor(intrinsic_i).to(device)
+    intrinsic_j_tensor = torch.FloatTensor(intrinsic_j).to(device)
+    extrinsic_i_tensor = torch.FloatTensor(extrinsic_i).to(device)
+    extrinsic_j_tensor = torch.FloatTensor(extrinsic_j).to(device)
+    corr_points_i = corr_points_i.to(extrinsic_i_tensor.dtype)
+    corr_points_j = corr_points_j.to(extrinsic_i_tensor.dtype)
+
+    P_i = intrinsic_i_tensor @ extrinsic_i_tensor
+    P_j = intrinsic_j_tensor @ extrinsic_j_tensor
+    Fm = kornia.geometry.epipolar.fundamental_from_projections(P_i[:, :3], P_j[:, :3])
+    err = kornia.geometry.symmetrical_epipolar_distance(corr_points_i[:, None, :2], corr_points_j[:, None, :2], Fm, squared=False, eps=1e-08)
+    
+    hist, bin_edges = torch.histogram(err.cpu(), bins=100, range=(0, 20), density=True)  # move to cpu to avoid CUDA "backend"
+    corr_weights = torch.zeros_like(err)
+    for i in range(len(bin_edges) - 1):
+        mask = (err >= bin_edges[i]) & (err < bin_edges[i + 1])
+        if torch.any(mask):
+            corr_weights[mask] = (hist[i] * (bin_edges[i + 1] - bin_edges[i])) / (bin_edges[-1] - bin_edges[0])
+    corr_weights /= corr_weights.mean()
+    
+    # set corr_weights to 0 for points outside the image frame
+    in_frame_i = (corr_points_i[..., 0] > depth_conf.shape[-1]) & (corr_points_i[..., 0] < 0) & \
+                    (corr_points_i[..., 1] > depth_conf.shape[-2]) & (corr_points_i[..., 1] < 0)
+    in_frame_j = (corr_points_j[..., 0] > depth_conf.shape[-1]) & (corr_points_j[..., 0] < 0) & \
+                    (corr_points_j[..., 1] > depth_conf.shape[-2]) & (corr_points_j[..., 1] < 0)
+    corr_weights[in_frame_i & in_frame_j] = 0.0
+    
+    # rearrange corr_points_i_normalized and corr_points_j_normalized to (P, N, 2)
+    P, N = len(num_matches), max(num_matches)
+    corr_points_i_batched = torch.zeros((P, N, 2), dtype=corr_points_i.dtype, device=corr_points_i.device)
+    corr_points_j_batched = torch.zeros((P, N, 2), dtype=corr_points_j.dtype, device=corr_points_j.device)
+    corr_weights_batched = torch.zeros((P, N, 1), dtype=corr_weights.dtype, device=corr_weights.device)
+    image_names_i_batched = np.zeros((P), dtype=image_names_i.dtype)
+    image_names_j_batched = np.zeros((P), dtype=image_names_j.dtype)
+
+    start_idx = 0
+    for p in range(P):
+        end_idx = start_idx + num_matches[p]
+        corr_points_i_batched[p, :num_matches[p]] = corr_points_i[start_idx:end_idx]
+        corr_points_j_batched[p, :num_matches[p]] = corr_points_j[start_idx:end_idx]
+        corr_weights_batched[p, :num_matches[p]] = corr_weights[start_idx:end_idx]
+        image_names_i_batched[p] = image_names_i[start_idx]
+        image_names_j_batched[p] = image_names_j[start_idx]
+        assert (image_names_i[start_idx:end_idx] == image_names_i_batched[p]).all()
+        assert (image_names_j[start_idx:end_idx] == image_names_j_batched[p]).all()
+        start_idx = end_idx
+    
+    output_dict = {
+        "corr_points_i": corr_points_i_batched,
+        "corr_points_j": corr_points_j_batched,
+        "corr_weights": corr_weights_batched,
+        "image_names_i": image_names_i_batched,
+        "image_names_j": image_names_j_batched,
+        "num_matches": num_matches,
+        "epipolar_err": err.median().item()
+    }
+
+    return output_dict
+
+@torch.inference_mode()
+def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128, err_range=60):
 
     xfeat = torch.hub.load('/home/jing_li/.cache/torch/hub/verlab_accelerated_features_main', 
                            'XFeat', source='local', pretrained=True, top_k=max_query_pts)  # TODO: remove the local path
@@ -173,7 +325,7 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
     Fm = kornia.geometry.epipolar.fundamental_from_projections(P_i[:, :3], P_j[:, :3])
     err = kornia.geometry.symmetrical_epipolar_distance(corr_points_i[:, None, :2], corr_points_j[:, None, :2], Fm, squared=False, eps=1e-08)
     
-    hist, bin_edges = torch.histogram(err.cpu(), bins=100, range=(0, 20), density=True)  # move to cpu to avoid CUDA "backend"
+    hist, bin_edges = torch.histogram(err.cpu(), bins=100, range=(0, err_range), density=True)  # move to cpu to avoid CUDA "backend"
     corr_weights = torch.zeros_like(err)
     for i in range(len(bin_edges) - 1):
         mask = (err >= bin_edges[i]) & (err < bin_edges[i + 1])
