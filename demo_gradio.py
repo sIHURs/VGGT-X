@@ -20,11 +20,14 @@ sys.path.append("vggt/")
 
 from visual_util import predictions_to_glb
 from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images
+from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 
+
+torch._dynamo.config.accumulated_cache_size_limit = 512
 device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
 
 print("Initializing and loading VGGT model...")
 # model = VGGT.from_pretrained("facebook/VGGT-1B")  # another way to load the model
@@ -32,11 +35,9 @@ print("Initializing and loading VGGT model...")
 model = VGGT()
 _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
 model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
-
-
 model.eval()
-model = model.to(device)
-
+model = model.to(device).to(dtype)
+model.track_head = None  # we do not need tracking head for reconstruction
 
 # -------------------------------------------------------------------------
 # 1) Core model inference
@@ -47,14 +48,8 @@ def run_model(target_dir, model) -> dict:
     """
     print(f"Processing images from {target_dir}")
 
-    # Device check
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     if not torch.cuda.is_available():
         raise ValueError("CUDA is not available. Check your environment.")
-
-    # Move model to device
-    model = model.to(device)
-    model.eval()
 
     # Load and preprocess images
     image_names = glob.glob(os.path.join(target_dir, "images", "*"))
@@ -63,22 +58,19 @@ def run_model(target_dir, model) -> dict:
     if len(image_names) == 0:
         raise ValueError("No images found. Check your upload.")
 
-    images = load_and_preprocess_images(image_names).to(device)
+    images, _ = load_and_preprocess_images_ratio(image_names, 518)
     print(f"Preprocessed images shape: {images.shape}")
 
     # Run inference
     print("Running inference...")
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            predictions = model(images)
-
-    # Convert pose encoding to extrinsic and intrinsic matrices
-    print("Converting pose encoding to extrinsic and intrinsic matrices...")
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], images.shape[-2:])
-    predictions["extrinsic"] = extrinsic
-    predictions["intrinsic"] = intrinsic
+        predictions = model(images.to(device, dtype), verbose=True)
+        print("Converting pose encoding to extrinsic and intrinsic matrices...")
+        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions['pose_enc'], images.shape[-2:])
+        predictions["extrinsic"] = extrinsic
+        predictions["intrinsic"] = intrinsic
+        predictions.pop("pose_enc_list", None)
 
     # Convert tensors to numpy
     for key in predictions.keys():
@@ -141,7 +133,8 @@ def handle_uploads(input_video, input_images):
 
         vs = cv2.VideoCapture(video_path)
         fps = vs.get(cv2.CAP_PROP_FPS)
-        frame_interval = int(fps * 1)  # 1 frame/sec
+        # frame_interval = int(fps * 1)  # 1 frame/sec
+        frame_interval = 1  # every frame
 
         count = 0
         video_frame_num = 0
@@ -337,7 +330,7 @@ fern_video = "examples/videos/fern.mp4"
 single_cartoon_video = "examples/videos/single_cartoon.mp4"
 single_oil_painting_video = "examples/videos/single_oil_painting.mp4"
 pyramid_video = "examples/videos/pyramid.mp4"
-
+barn_video = "examples/videos/Barn.mp4"
 
 # -------------------------------------------------------------------------
 # 6) Build Gradio UI
@@ -488,6 +481,7 @@ with gr.Blocks(
         [room_video, "8", None, 5.0, False, False, True, False, "Depthmap and Camera Branch", "True"],
         [kitchen_video, "25", None, 50.0, False, False, True, False, "Depthmap and Camera Branch", "True"],
         [fern_video, "20", None, 45.0, False, False, True, False, "Depthmap and Camera Branch", "True"],
+        [barn_video, "410", None, 45.0, False, False, True, False, "Depthmap and Camera Branch", "True"],
     ]
 
     def example_pipeline(
