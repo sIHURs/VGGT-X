@@ -158,3 +158,5 @@ notebooks/*.pt
 notebooks/*.npz
 notebooks/*.ply
 notebooks/sparse
+input_images_*
+notebooks/trajectories*
