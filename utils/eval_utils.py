@@ -44,7 +44,7 @@ class RichLogger:
 
 logger = RichLogger()
 
-def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=None):
+def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=None, min_map=None, max_map=None, abs=False):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
@@ -105,6 +105,7 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=No
     ) as f:
         json.dump(ape_stats, f, indent=4)
 
+    err = np.abs(ape_metric.error) if abs else ape_metric.error
     plot_mode = evo.tools.plot.PlotMode.xy
     fig = plt.figure(figsize=(12, 8))  # Make figure larger with 12x8 inches size
     ax = evo.tools.plot.prepare_axis(fig, plot_mode)
@@ -113,10 +114,10 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=No
     fixed_traj_colormap(
         ax,
         traj_est_aligned,
-        ape_metric.error,
+        err,
         plot_mode,
-        min_map=ape_stats["min"],
-        max_map=ape_stats["max"],
+        min_map=ape_stats["min"] if min_map is None else min_map,
+        max_map=ape_stats["max"] if max_map is None else max_map,
     )
     ax.legend()
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=150)  # Increased DPI for better quality

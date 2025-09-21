@@ -250,7 +250,7 @@ def vggt_extract_matches(model, extrinsic, intrinsic, depth_conf, track_feats, b
     return output_dict
 
 @torch.inference_mode()
-def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_query_pts=4096, batch_size=128, err_range=20):
+def extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, max_query_pts=4096, batch_size=128, err_range=20):
 
     xfeat = torch.hub.load('/home/jing_li/.cache/torch/hub/verlab_accelerated_features_main', 
                            'XFeat', source='local', pretrained=True, top_k=max_query_pts)  # TODO: remove the local path
@@ -279,7 +279,7 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
         matches_batch = xfeat.match_xfeat_star(images_i, images_j)
         if len(images_i) == 1:
             matches_batch = [torch.concatenate([torch.tensor(matches_batch[0], device=images_i.device), 
-                                               torch.tensor(matches_batch[1], device=images_i.device)], dim=-1)]
+                                                torch.tensor(matches_batch[1], device=images_i.device)], dim=-1)]
         matches_list.extend(matches_batch)
 
     num_matches = [len(m) for m in matches_list]
@@ -314,6 +314,31 @@ def extract_matches(extrinsic, intrinsic, images, base_image_path_list, max_quer
     extrinsic_j[:, 3, 3] = 1.0
 
     device = corr_points_i.device
+
+    # depth_conf = torch.from_numpy(depth_conf)[:, None]
+    # depth_conf_i = torch.zeros_like(corr_points_i[:, :1])
+    # depth_conf_j = torch.zeros_like(corr_points_j[:, :1])
+    # corr_points_i_normalized = corr_points_i / torch.tensor([images.shape[-1], images.shape[-2]], dtype=corr_points_i.dtype) * 2 - 1
+    # corr_points_j_normalized = corr_points_j / torch.tensor([images.shape[-1], images.shape[-2]], dtype=corr_points_j.dtype) * 2 - 1
+
+    # for frame_idx in tqdm(np.unique(indexes_i_expanded)):
+    #     depth_conf_i[indexes_i_expanded==frame_idx] = F.grid_sample(
+    #         depth_conf[frame_idx].unsqueeze(0),
+    #         corr_points_i_normalized[indexes_i_expanded==frame_idx][None, None],
+    #         align_corners=True,
+    #         mode='bilinear'
+    #     ).squeeze(0, 2).permute(1, 0)
+
+    # for frame_idx in tqdm(np.unique(indexes_j_expanded)):
+    #     depth_conf_j[indexes_j_expanded==frame_idx] = F.grid_sample(
+    #         depth_conf[frame_idx].unsqueeze(0),
+    #         corr_points_j_normalized[indexes_j_expanded==frame_idx][None, None],
+    #         align_corners=True,
+    #         mode='bilinear'
+    #     ).squeeze(0, 2).permute(1, 0)
+    
+    # corr_weights = torch.sqrt(depth_conf_i * depth_conf_j)
+    # corr_weights /= corr_weights.mean()
 
     intrinsic_i_tensor = torch.FloatTensor(intrinsic_i).to(device)
     intrinsic_j_tensor = torch.FloatTensor(intrinsic_j).to(device)

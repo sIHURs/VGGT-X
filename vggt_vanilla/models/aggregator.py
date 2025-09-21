@@ -10,10 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union, List, Dict, Any
 
-from vggt.layers import PatchEmbed
-from vggt.layers.block import Block
-from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from vggt_vanilla.layers import PatchEmbed
+from vggt_vanilla.layers.block import Block
+from vggt_vanilla.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from vggt_vanilla.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
 
@@ -177,11 +177,13 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor, intermediate_layer_idx=[4, 11, 17, 23]) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, logger: logging.Logger, intermediate_layer_idx=[4, 11, 17, 23], chunk_size=128) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            logger (logging.Logger): Logger to record VRAM usage.
+            intermediate_layer_idx (list[int]): Indices of layers to output intermediate features from.
 
         Returns:
             (list[torch.Tensor], int):
@@ -198,7 +200,25 @@ class Aggregator(nn.Module):
 
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
-        patch_tokens = self.patch_embed(images)
+
+        torch.cuda.reset_peak_memory_stats()
+
+        patch_tokens_list = []
+        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        for i in range(0, B * S, chunk_size):
+            end = min(i + chunk_size, B * S)
+            patch_tokens_chunk = self.patch_embed(images[i:end])
+            if isinstance(patch_tokens_chunk, dict):
+                patch_tokens_chunk = patch_tokens_chunk["x_norm_patchtokens"].to(dtype)
+            else:
+                patch_tokens = patch_tokens.to(dtype)
+            patch_tokens_list.append(patch_tokens_chunk)
+        # Concatenate patch tokens from all chunks
+        patch_tokens = torch.cat(patch_tokens_list, dim=0)
+        del patch_tokens_list, images
+
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+        logger.info(f"Max VRAM usage after patch embedding: {max_memory:.2f} MB")
 
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
@@ -214,13 +234,13 @@ class Aggregator(nn.Module):
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=patch_tokens.device)
 
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
+            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(patch_tokens.device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
 
         # update P because we added special tokens
@@ -231,34 +251,43 @@ class Aggregator(nn.Module):
         layer_idx = 0
         output_list = []
 
+        torch.cuda.reset_peak_memory_stats()
+        
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos
+                        tokens, B, S, P, C, frame_idx, pos=pos, chunk_size=chunk_size
                     )
                 elif attn_type == "global":
                     tokens, global_idx, global_intermediates = self._process_global_attention(
                         tokens, B, S, P, C, global_idx, pos=pos
                     )
                 else:
-                    raise ValueError(f"Unknown attention type: {attn_type}")
+                    raise ValueError(f"Unknown attention type: {attn_type}")  
 
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
-                concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 if layer_idx in intermediate_layer_idx:
-                    output_list.append(concat_inter)
+                    concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
+                    output_list.append(concat_inter.cpu())
                 else:
                     output_list.append(None)
                 layer_idx += 1
+        
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+        logger.info(f"VRAM usage after {self.aa_block_num} AA Layers: {max_memory:.2f} MB")
 
         del concat_inter
         del frame_intermediates
         del global_intermediates
+
+        for k in intermediate_layer_idx:
+            output_list[k] = output_list[k].to(patch_tokens.device)
+
         return output_list, self.patch_start_idx
 
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, chunk_size=128):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
         """
@@ -273,7 +302,9 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            for i in range(0, B * S, chunk_size):
+                end = min(i + chunk_size, B * S)
+                tokens[i:end] = self.frame_blocks[frame_idx](tokens[i:end], pos=pos[i:end] if pos is not None else None)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 

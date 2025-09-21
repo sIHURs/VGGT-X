@@ -8,6 +8,7 @@ import random
 import numpy as np
 import glob
 import os
+import logging
 import copy
 import torch
 import torch.nn.functional as F
@@ -55,17 +56,30 @@ def run_VGGT(images, device, dtype):
     model.track_head = None  # we do not need tracking head for reconstruction
     print(f"Model loaded")
 
+    # Initialize logger to record the VTAM cost of each part
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        filename="./VRAM_Aggregator.log"
+    )
+    logger = logging.getLogger("VRAM_VGGT")
+    logger.info(f"Number of images: {images.shape[0]}")
+
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None].to(device)  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images)
+            aggregated_tokens_list, ps_idx = model.aggregator(images, logger)
 
+        torch.cuda.reset_peak_memory_stats()
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
         # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
         extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
         # Predict Depth Maps
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+
+        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+        logger.info(f"Max VRAM after Heads: {max_memory:.2f} MB")
 
     extrinsic = extrinsic.squeeze(0).cpu().numpy()
     intrinsic = intrinsic.squeeze(0).cpu().numpy()
