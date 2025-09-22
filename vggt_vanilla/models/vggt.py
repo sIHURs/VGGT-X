@@ -9,9 +9,9 @@ import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin  # used for model hub
 
 from vggt_vanilla.models.aggregator import Aggregator
-from vggt_vanilla.heads.camera_head import CameraHead
-from vggt_vanilla.heads.dpt_head import DPTHead
-from vggt_vanilla.heads.track_head import TrackHead
+from vggt.heads.camera_head import CameraHead
+from vggt.heads.dpt_head import DPTHead
+from vggt.heads.track_head import TrackHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
@@ -25,6 +25,15 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
+
+    def to(self, *args, **kwargs):
+        # TODO: this won't work if the module is inside another module
+        self.aggregator = self.aggregator.to(*args, **kwargs)
+        self.camera_head = self.camera_head.to(*args, **kwargs)
+        self.point_head = self.point_head.to(*args, **kwargs)
+        self.depth_head = self.depth_head.to(*args, **kwargs)
+        self.track_head = self.track_head.to(*args, **kwargs)
+        return self
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
         """

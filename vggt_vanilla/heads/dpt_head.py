@@ -239,7 +239,7 @@ class DPTHead(nn.Module):
         if self.feature_only:
             return out.view(B, S, *out.shape[1:])
 
-        out = self.scratch.output_conv2(out)
+        out = self.scratch.output_conv2(out).float()
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
 
         preds = preds.view(B, S, *preds.shape[1:])
@@ -256,7 +256,7 @@ class DPTHead(nn.Module):
         pos_embed = position_grid_to_embed(pos_embed, x.shape[1])
         pos_embed = pos_embed * ratio
         pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
-        return x + pos_embed
+        return (x + pos_embed).to(x.dtype)
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
         """

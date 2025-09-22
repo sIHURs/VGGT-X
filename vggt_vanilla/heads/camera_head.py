@@ -134,7 +134,7 @@ class CameraHead(nn.Module):
 
             # Apply final activation functions for translation, quaternion, and field-of-view.
             activated_pose = activate_pose(
-                pred_pose_enc, trans_act=self.trans_act, quat_act=self.quat_act, fl_act=self.fl_act
+                pred_pose_enc.float(), trans_act=self.trans_act, quat_act=self.quat_act, fl_act=self.fl_act
             )
             pred_pose_enc_list.append(activated_pose)
 

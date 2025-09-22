@@ -10,10 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union, List, Dict, Any
 
-from vggt_vanilla.layers import PatchEmbed
-from vggt_vanilla.layers.block import Block
-from vggt_vanilla.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from vggt_vanilla.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from vggt.layers import PatchEmbed
+from vggt.layers.block import Block
+from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
 
@@ -250,8 +250,6 @@ class Aggregator(nn.Module):
         global_idx = 0
         layer_idx = 0
         output_list = []
-
-        torch.cuda.reset_peak_memory_stats()
         
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:

@@ -52,7 +52,7 @@ def run_VGGT(images, device, dtype):
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
-    model = model.to(device)
+    model = model.to(device).to(dtype)
     model.track_head = None  # we do not need tracking head for reconstruction
     print(f"Model loaded")
 
@@ -66,11 +66,10 @@ def run_VGGT(images, device, dtype):
     logger.info(f"Number of images: {images.shape[0]}")
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
-            images = images[None].to(device)  # add batch dimension
-            aggregated_tokens_list, ps_idx = model.aggregator(images, logger)
+        # with torch.cuda.amp.autocast(dtype=dtype):
+        images = images[None].to(device, dtype)  # add batch dimension
+        aggregated_tokens_list, ps_idx = model.aggregator(images, logger)
 
-        torch.cuda.reset_peak_memory_stats()
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
         # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
@@ -176,7 +175,7 @@ def demo_fn(args):
     else:
         if args.max_query_pts is None:
             args.max_query_pts = 4096 if len(images) < 500 else 2048
-        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
         match_outputs["original_width"] = images.shape[-1]
         match_outputs["original_height"] = images.shape[-2]
         torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
