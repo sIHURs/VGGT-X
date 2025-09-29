@@ -44,7 +44,7 @@ class RichLogger:
 
 logger = RichLogger()
 
-def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=None, min_map=None, max_map=None, abs=False):
+def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=None, min_map=None, max_map=None, abs=False, colorbar=True, title_font_size=20):
     ## Plot
     traj_ref = PosePath3D(poses_se3=poses_gt)
     traj_est = PosePath3D(poses_se3=poses_est)
@@ -109,7 +109,16 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=No
     plot_mode = evo.tools.plot.PlotMode.xy
     fig = plt.figure(figsize=(12, 8))  # Make figure larger with 12x8 inches size
     ax = evo.tools.plot.prepare_axis(fig, plot_mode)
-    ax.set_title(f"ATE RMSE: {ape_stat}")
+    ax.set_title(f"ATE: {ape_stat:.3f}", font={'size': title_font_size})
+    # close the axis if not colorbar
+    if not colorbar:
+        ax.xaxis.set_major_locator(plt.NullLocator())
+        ax.yaxis.set_major_locator(plt.NullLocator())
+        ax.xaxis.set_major_formatter(plt.NullFormatter())
+        ax.yaxis.set_major_formatter(plt.NullFormatter())
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+    
     evo.tools.plot.traj(ax, plot_mode, traj_ref, "--", "gray", "gt")
     fixed_traj_colormap(
         ax,
@@ -118,9 +127,11 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False, edges=No
         plot_mode,
         min_map=ape_stats["min"] if min_map is None else min_map,
         max_map=ape_stats["max"] if max_map is None else max_map,
+        colorbar=colorbar,
     )
-    ax.legend()
-    plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=150)  # Increased DPI for better quality
+    ax.legend(fontsize=title_font_size)
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=150, bbox_inches="tight", pad_inches=0)  # Increased DPI for better quality
     plt.close(fig)  
 
     return ape_stats
@@ -175,7 +186,7 @@ def eval_ate(poses_est, poses_gt, save_dir, iterations, final=False, monocular=F
 
 from evo.tools.plot import colored_line_collection, set_aspect_equal_3d
 from matplotlib import cm
-def fixed_traj_colormap(ax, traj, array, plot_mode, min_map, max_map, title=""):
+def fixed_traj_colormap(ax, traj, array, plot_mode, min_map, max_map, title="", colorbar=True):
     """
     color map a path/trajectory in xyz coordinates according to
     an array of values
@@ -204,15 +215,16 @@ def fixed_traj_colormap(ax, traj, array, plot_mode, min_map, max_map, title=""):
         if SETTINGS.plot_xyz_realistic:
             set_aspect_equal_3d(ax)
     fig = plt.gcf()
-    cbar = fig.colorbar(
-        #mapper, ticks=[min_map, (max_map - (max_map - min_map) / 2), max_map])
-        # fix the colorbar
-        mapper, ticks=[min_map, (max_map - (max_map - min_map) / 2), max_map], ax=plt.gca())
-    cbar.ax.set_yticklabels([
-        "{0:0.3f}".format(min_map),
-        "{0:0.3f}".format(max_map - (max_map - min_map) / 2),
-        "{0:0.3f}".format(max_map)
-    ])
+    if colorbar:
+        cbar = fig.colorbar(
+            #mapper, ticks=[min_map, (max_map - (max_map - min_map) / 2), max_map])
+            # fix the colorbar
+            mapper, ticks=[min_map, (max_map - (max_map - min_map) / 2), max_map], ax=plt.gca())
+        cbar.ax.set_yticklabels([
+            "{0:0.3f}".format(min_map),
+            "{0:0.3f}".format(max_map - (max_map - min_map) / 2),
+            "{0:0.3f}".format(max_map)
+        ])
     if title:
         ax.legend(frameon=True)
         plt.title(title)

@@ -154,7 +154,7 @@ def demo_fn(args):
     else:
         if args.max_query_pts is None:
             args.max_query_pts = 4096 if len(images) < 500 else 2048
-        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, base_image_path_list, args.max_query_pts)
+        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
         match_outputs["original_width"] = images.shape[-1]
         match_outputs["original_height"] = images.shape[-2]
         torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
@@ -170,7 +170,6 @@ def demo_fn(args):
 
     conf_thres_value = np.percentile(depth_conf, 0.5)
     print(f"Using confidence threshold: {conf_thres_value}")
-    # conf_thres_value = 5.0
     max_points_for_colmap = 500000  # randomly sample 3D points
     shared_camera = False  # in the feedforward manner, we do not support shared camera
     camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
@@ -282,7 +281,7 @@ def demo_fn(args):
             if j not in indexes_i:
                 single_mask = (corr_weights[j] > 0.1)
                 conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
-        conf_mask = conf_mask & (depth_conf >= conf_mask)
+        conf_mask = conf_mask & (depth_conf >= conf_thres_value)
         conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
     else:
         conf_mask = depth_conf >= conf_thres_value

@@ -169,22 +169,22 @@ def demo_fn(args):
     
     images = images.to(device)
     
-    if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
-        print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
-        match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
-    else:
-        if args.max_query_pts is None:
-            args.max_query_pts = 4096 if len(images) < 500 else 2048
-        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
-        match_outputs["original_width"] = images.shape[-1]
-        match_outputs["original_height"] = images.shape[-2]
-        torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
-        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
-    if args.use_opt:
-        extrinsic, intrinsic = opt_utils.pose_optimization(
-            match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
-            base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
-        )
+    # if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
+    #     print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
+    #     match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
+    # else:
+    #     if args.max_query_pts is None:
+    #         args.max_query_pts = 4096 if len(images) < 500 else 2048
+    #     match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
+    #     match_outputs["original_width"] = images.shape[-1]
+    #     match_outputs["original_height"] = images.shape[-2]
+    #     torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
+    #     print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
+    # if args.use_opt:
+    #     extrinsic, intrinsic = opt_utils.pose_optimization(
+    #         match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
+    #         base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
+    #     )
         
     end_time = datetime.now()
     max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
