@@ -9,7 +9,6 @@ import numpy as np
 import glob
 import os
 import copy
-import datetime
 import torch
 import torch.nn.functional as F
 
@@ -23,16 +22,18 @@ from pathlib import Path
 import trimesh
 import pycolmap
 import utils.colmap as colmap_utils
+import utils.opt as opt_utils
 from datetime import datetime
+from utils.umeyama import umeyama
+from utils.metric_torch import evaluate_auc, evaluate_pcd
 
+from tqdm import tqdm
 from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images_square
+from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
-from vggt.dependency.track_predict import predict_tracks
-from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
-
+from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track
 
 # TODO: add support for masks
 # TODO: add iterative BA
@@ -42,29 +43,7 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 
 torch._dynamo.config.accumulated_cache_size_limit = 512
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
-    parser.add_argument("--post_fix", type=str, required=True, help="post fix for the output directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
-    ######### BA parameters #########
-    parser.add_argument(
-        "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
-    )
-    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
-    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
-    parser.add_argument("--vis_thresh", type=float, default=0.2, help="Visibility threshold for tracks")
-    parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
-    parser.add_argument("--query_frame_num", type=int, default=None, help="Number of frames to query")
-    parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
-    parser.add_argument(
-        "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
-    )
-    return parser.parse_args()
-
-
-def run_VGGT(images, device, dtype, resolution=518):
+def run_VGGT(images, device, dtype):
     # images: [B, 3, H, W]
 
     # Run VGGT for camera and depth estimation
@@ -73,21 +52,8 @@ def run_VGGT(images, device, dtype, resolution=518):
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
     model = model.to(device).to(dtype)
+    model.track_head = None  # we do not need tracking head for reconstruction
     print(f"Model loaded")
-
-    device = next(model.parameters()).device
-    # hard-coded to use 518 for VGGT
-    height, width = images.shape[-2:]
-    # Make the largest dimension 518px while maintaining aspect ratio
-    if width >= height:
-        new_width = resolution
-        new_height = round(height * (new_width / width) / 14) * 14  # Make divisible by 14
-    else:
-        new_height = resolution
-        new_width = round(width * (new_height / height) / 14) * 14  # Make divisible by 14
-    
-    images = F.interpolate(images, size=(new_height, new_width), mode="bilinear", align_corners=False)
-    images = images.to(device)
 
     with torch.no_grad():
         predictions = model(images.to(device, dtype), verbose=True)
@@ -99,10 +65,30 @@ def run_VGGT(images, device, dtype, resolution=518):
     
     return extrinsic, intrinsic, depth_map, depth_conf
 
-@torch.inference_mode()
+def parse_args():
+    parser = argparse.ArgumentParser(description="VGGT Demo")
+    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--post_fix", type=str, required=True, help="post fix for the output directory")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--use_opt", action="store_true", default=False, help="Use pose optimization for reconstruction")
+    parser.add_argument("--save_depth_only", action="store_true", default=False, help="If only save depth")
+    ######### BA parameters #########
+    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
+    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
+    parser.add_argument("--max_query_pts", type=int, default=None, help="Maximum number of query points")
+    parser.add_argument("--gt_intr", action="store_true", default=False, help="Replace the estimated intrinsic with ground truth intrinsics")
+    parser.add_argument(
+        "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
+    )
+    return parser.parse_args()
+
 def demo_fn(args):
     # Print configuration
     print("Arguments:", vars(args))
+
+    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}{args.post_fix}", os.path.basename(args.scene_dir))
+    os.makedirs(target_scene_dir, exist_ok=True)
 
     # Set seed for reproducibility
     random.seed(args.seed)
@@ -124,8 +110,6 @@ def demo_fn(args):
     image_dir = os.path.join(args.scene_dir, "images")
     if args.total_frame_num is None:
         args.total_frame_num = len(os.listdir(image_dir))
-    if args.query_frame_num is None:
-        args.query_frame_num = args.total_frame_num // 2
 
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
         print("Using order of ground truth images from COLMAP sparse reconstruction")
@@ -133,7 +117,7 @@ def demo_fn(args):
 
         if args.total_frame_num > len(images_gt):
             raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
-        images_gt = dict(list(images_gt.items())[: args.total_frame_num])
+        images_gt = dict(list(images_gt.items())[:args.total_frame_num])
 
         images_gt_keys = list(images_gt.keys())
         random.shuffle(images_gt_keys)
@@ -149,10 +133,9 @@ def demo_fn(args):
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
-    vggt_fixed_resolution = 518
-    img_load_resolution = 1024
+    img_load_resolution = 518
 
-    images, original_coords = load_and_preprocess_images_square(image_path_list, img_load_resolution)
+    images, original_coords = load_and_preprocess_images_ratio(image_path_list, img_load_resolution)
     original_coords = original_coords.to(device)
     print(f"Loaded {len(images)} images from {image_dir}")
 
@@ -161,141 +144,181 @@ def demo_fn(args):
 
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype, vggt_fixed_resolution)
-
-    inverse_idx = [images_gt_keys.index(key) for key in list(images_gt.keys())]
-    extrinsic = extrinsic[inverse_idx]
-    intrinsic = intrinsic[inverse_idx]
-    depth_map = depth_map[inverse_idx]
-    depth_conf = depth_conf[inverse_idx]
-    images = images[inverse_idx]
-    original_coords = original_coords[inverse_idx]
-    images_gt_keys = list(images_gt.keys())
-    images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
-    image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
-    base_image_path_list = [os.path.basename(path) for path in image_path_list]
-
-    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype)
+    
     images = images.to(device)
-
-    if args.use_ba:
-        image_size = np.array(images.shape[-2:])
-        scale = img_load_resolution / vggt_fixed_resolution
-        shared_camera = args.shared_camera
-
-        with torch.cuda.amp.autocast(dtype=dtype):
-            # Predicting Tracks
-            # Using VGGSfM tracker instead of VGGT tracker for efficiency
-            # VGGT tracker requires multiple backbone runs to query different frames (this is a problem caused by the training process)
-            # Will be fixed in VGGT v2
-
-            # You can also change the pred_tracks to tracks from any other methods
-            # e.g., from COLMAP, from CoTracker, or by chaining 2D matches from Lightglue/LoFTR.
-            pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
-                images,
-                conf=depth_conf,
-                points_3d=points_3d,
-                masks=None,
-                max_query_pts=args.max_query_pts,
-                query_frame_num=args.query_frame_num,
-                keypoint_extractor="aliked+sp",
-                fine_tracking=args.fine_tracking,
-            )
-        
-        # rescale the intrinsic matrix from 518 to 1024
-        intrinsic[:, :2, :] *= scale
-        track_mask = pred_vis_scores > args.vis_thresh
-
-        # TODO: radial distortion, iterative BA, masks
-        reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
-            points_3d,
-            extrinsic,
-            intrinsic,
-            pred_tracks,
-            image_size,
-            masks=track_mask,
-            max_reproj_error=args.max_reproj_error,
-            shared_camera=shared_camera,
-            camera_type=args.camera_type,
-            points_rgb=points_rgb,
-        )
-
-        if reconstruction is None:
-            raise ValueError("No reconstruction can be built with BA")
-
-        # Bundle Adjustment
-        ba_options = pycolmap.BundleAdjustmentOptions()
-        pycolmap.bundle_adjustment(reconstruction, ba_options)
-
-        reconstruction_resolution = img_load_resolution
-
-        end_time = datetime.now()
-        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+    
+    if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
+        print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
+        match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
     else:
-        end_time = datetime.now()
-        max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
-
-        conf_thres_value = 5  # hard-coded to 5
-        max_points_for_colmap = 100000 * (args.total_frame_num // 25)  # randomly sample 3D points
-        shared_camera = False  # in the feedforward manner, we do not support shared camera
-        camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
-
-        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
-        num_frames, height, width, _ = points_3d.shape
-
-        points_rgb = F.interpolate(
-            images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
+        if args.max_query_pts is None:
+            args.max_query_pts = 4096 if len(images) < 500 else 2048
+        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
+        match_outputs["original_width"] = images.shape[-1]
+        match_outputs["original_height"] = images.shape[-2]
+        torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
+        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
+    if args.use_opt:
+        extrinsic, intrinsic = opt_utils.pose_optimization(
+            match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
+            base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
         )
         
-        if vggt_fixed_resolution != img_load_resolution:
-            for i in range(num_frames):
-                # automatically decide top left and bottom right corners of the image
-                height_sum = points_rgb[i].sum(dim=(0, 1))
-                width_sum = points_rgb[i].sum(dim=(0, 2))
-                original_coords[i, 0] = (height_sum > 0).nonzero(as_tuple=True)[0][0].item()
-                original_coords[i, 1] = (width_sum > 0).nonzero(as_tuple=True)[0][0].item()
-                original_coords[i, 2] = (height_sum > 0).nonzero(as_tuple=True)[0][-1].item()
-                original_coords[i, 3] = (width_sum > 0).nonzero(as_tuple=True)[0][-1].item()
+    end_time = datetime.now()
+    max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
 
-        points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
-        points_rgb = points_rgb.transpose(0, 2, 3, 1)
+    conf_thres_value = np.percentile(depth_conf, 0.5)
+    print(f"Using confidence threshold: {conf_thres_value}")
+    max_points_for_colmap = 500000  # randomly sample 3D points
+    shared_camera = False  # in the feedforward manner, we do not support shared camera
+    camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
-        # (S, H, W, 3), with x, y coordinates and frame indices
-        points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+    c = 2.5  # scale factor for better reconstruction, hard-coded here
+    extrinsic[:, :3, 3] *= c
+    depth_map *= c
 
+    if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
+        pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
+        # max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
+
+        if images_gt_updated is not None:
+            from utils.umeyama import umeyama
+
+            translation_gt = torch.tensor([image.tvec for image in images_gt_updated.values()], device=device)
+            rotation_gt = torch.tensor([colmap_utils.qvec2rotmat(image.qvec) for image in images_gt_updated.values()], device=device)
+
+            # gt w2c
+            gt_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+            gt_se3[:, :3, :3] = rotation_gt
+            gt_se3[:, 3, :3] = translation_gt
+
+            # pred w2c
+            pred_se3 = torch.eye(4, device=device).unsqueeze(0).repeat(len(images_gt_updated), 1, 1)
+            pred_se3[:, :3, :3] = torch.tensor(extrinsic[:, :3, :3], device=device)
+            pred_se3[:, 3, :3] = torch.tensor(extrinsic[:, :3, 3], device=device)
+
+            auc_results, pred_se3_aligned, c, R, t = evaluate_auc(pred_se3, gt_se3, device, return_aligned=True)
+
+            # align prediction to gt points, yielding lower results
+            # extrinsic[:, :3, :3] = pred_se3_aligned[:, :3, :3].cpu().numpy()
+            # extrinsic[:, :3, 3] = pred_se3_aligned[:, 3, :3].cpu().numpy()
+            # depth_map *= c
+            
+            points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+            # align gt points to prediction
+            points_3d_transformed = c * (points_3d @ R.T) + t.T
+            # points_3d_transformed = points_3d
+            
+            pcd_results = evaluate_pcd(
+                pcd_gt, points_3d_transformed, depth_conf, images,
+                images_gt_updated, original_coords, 
+                img_load_resolution, conf_thresh=1.5 if depth_conf.max() > 1.5 else conf_thres_value,
+            )
+
+            result_file = os.path.join(target_scene_dir, "vggt_results.txt")
+            with open(result_file, "w") as f:
+                f.write(f"Image Count: {len(images_gt_updated)},\n")
+                f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']},\n")
+                f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']},\n")
+                f.write(f"Racc_5: {auc_results['Racc_5']},\n")
+                f.write(f"Racc_15: {auc_results['Racc_15']},\n")
+                f.write(f"Tacc_5: {auc_results['Tacc_5']},\n")
+                f.write(f"Tacc_15: {auc_results['Tacc_15']},\n")
+                f.write(f"AUC at 30 degrees: {auc_results['Auc_30']},\n")
+                f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']},\n")
+                f.write(f"Completeness Mean: {pcd_results['completeness_mean']},\n")
+                f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']},\n")
+                f.write(f"Inference Time: {(end_time - start_time).total_seconds()},\n")
+                f.write(f"Peak Memory Usage (MB): {max_memory},\n")
+            
+    else:
+        print("No ground truth points3D.bin found, using random sampling")
+        points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # save depth_map and depth_conf as .npy files
+    # target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
+    # target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
+    # os.makedirs(target_depth_dir, exist_ok=True)
+    # os.makedirs(target_conf_dir, exist_ok=True)
+
+    # for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+    #     inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
+    #     normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
+    #     depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
+    #     depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
+    #     np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
+    #     np.save(depth_conf_path, depth_conf[idx].squeeze())
+    
+    # print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
+    # if args.save_depth_only:
+    #     return True
+
+    image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
+    num_frames, height, width, _ = points_3d.shape
+
+    points_rgb = F.interpolate(
+        images, size=(depth_map.shape[1], depth_map.shape[2]), mode="bilinear", align_corners=False
+    )
+    points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+    points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+    # (S, H, W, 3), with x, y coordinates and frame indices
+    points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+
+    if args.use_opt:
+        conf_mask = np.zeros_like(depth_conf, dtype=bool)
+        corr_points_i = np.round(match_outputs["corr_points_i"].cpu().numpy()).astype(int)
+        corr_points_j = np.round(match_outputs["corr_points_j"].cpu().numpy()).astype(int)
+        indexes_i = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_i"]]
+        indexes_j = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_j"]]
+        corr_weights = match_outputs["corr_weights"].cpu().numpy()
+        for i in range(len(indexes_i)):
+            single_mask = (corr_weights[i] > 0.1)
+            conf_mask[indexes_i[i], corr_points_i[i, single_mask[:, 0], 1], corr_points_i[i, single_mask[:, 0], 0]] = True
+        for j in range(len(indexes_j)):
+            if j not in indexes_i:
+                single_mask = (corr_weights[j] > 0.1)
+                conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
+        conf_mask = conf_mask & (depth_conf >= conf_thres_value)
+        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+    else:
         conf_mask = depth_conf >= conf_thres_value
         # at most writing max_points_for_colmap 3d points to colmap reconstruction object
         conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
 
-        points_3d = points_3d[conf_mask]
-        points_xyf = points_xyf[conf_mask]
-        points_rgb = points_rgb[conf_mask]
+    points_3d = points_3d[conf_mask]
+    points_xyf = points_xyf[conf_mask]
+    points_rgb = points_rgb[conf_mask]
 
-        print("Converting to COLMAP format")
-        reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            points_3d,
-            points_xyf,
-            points_rgb,
-            extrinsic,
-            intrinsic,
-            image_size,
-            shared_camera=shared_camera,
-            camera_type=camera_type,
-        )
+    inverse_idx = [images_gt_keys.index(key) for key in sorted(list(images_gt.keys()))]
+    base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
 
-        reconstruction_resolution = vggt_fixed_resolution
+    print("Converting to COLMAP format")
+    reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+        points_3d,
+        points_xyf,
+        points_rgb,
+        extrinsic[inverse_idx],
+        intrinsic[inverse_idx],
+        image_size,
+        shared_camera=shared_camera,
+        camera_type=camera_type,
+    )
 
-    reconstruction = rename_colmap_recons_and_rescale_camera(
+    reconstruction_resolution = (depth_map.shape[2], depth_map.shape[1])
+
+    reconstruction = colmap_utils.rename_colmap_recons_and_rescale_camera(
         reconstruction,
-        base_image_path_list,
-        original_coords.cpu().numpy(),
+        base_image_path_list_inv,
+        original_coords.cpu().numpy()[inverse_idx],
         img_size=reconstruction_resolution,
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
     )
 
-    target_scene_dir = os.path.join(f"{os.path.dirname(args.scene_dir)}{args.post_fix}", os.path.basename(args.scene_dir))
-    os.makedirs(target_scene_dir, exist_ok=True)
+    # first create a folder named f"{args.scene_dir}_vggt", then soft link everything from args.scene_dir except for "sparse"
     for item in os.listdir(args.scene_dir):
         if item != "sparse" and not item.endswith("results.txt"):
             src = os.path.join(args.scene_dir, item)
@@ -317,60 +340,12 @@ def demo_fn(args):
     # Save point cloud for fast visualization
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(target_scene_dir, "sparse/points.ply"))
 
-    result_file = os.path.join(target_scene_dir, "vggt_results.txt")
-    with open(result_file, "w") as f:
-        f.write(f"Image Count: {len(images_gt_updated)}\n")
-        f.write(f"Inference Time: {(end_time - start_time).total_seconds()}\n")
-        f.write(f"Peak Memory Usage (MB): {max_memory}\n")
-
     return True
-
-
-def rename_colmap_recons_and_rescale_camera(
-    reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
-):
-    rescale_camera = True
-
-    for pyimageid in reconstruction.images:
-        # Reshaped the padded&resized image to the original size
-        # Rename the images to the original names
-        pyimage = reconstruction.images[pyimageid]
-        pycamera = reconstruction.cameras[pyimage.camera_id]
-        pyimage.name = image_paths[pyimageid - 1]
-
-        if rescale_camera:
-            # Rescale the camera parameters
-            pred_params = copy.deepcopy(pycamera.params)
-
-            real_image_size = original_coords[pyimageid - 1, -2:]
-            resize_ratio = max(real_image_size) / img_size
-            pred_params = pred_params * resize_ratio
-            real_pp = real_image_size / 2
-            pred_params[-2:] = real_pp  # center of the image
-
-            pycamera.params = pred_params
-            pycamera.width = real_image_size[0]
-            pycamera.height = real_image_size[1]
-
-        if shift_point2d_to_original_res:
-            # Also shift the point2D to original resolution
-            top_left = original_coords[pyimageid - 1, :2]
-
-            for point2D in pyimage.points2D:
-                point2D.xy = (point2D.xy - top_left) * resize_ratio
-
-        if shared_camera:
-            # If shared_camera, all images share the same camera
-            # no need to rescale any more
-            rescale_camera = False
-
-    return reconstruction
 
 
 if __name__ == "__main__":
     args = parse_args()
-    with torch.no_grad():
-        demo_fn(args)
+    demo_fn(args)
 
 
 # Work in Progress (WIP)
