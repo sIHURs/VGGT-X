@@ -8,7 +8,6 @@ import random
 import numpy as np
 import glob
 import os
-import copy
 import torch
 import torch.nn.functional as F
 
@@ -18,16 +17,13 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 
 import argparse
-from pathlib import Path
 import trimesh
-import pycolmap
 import utils.colmap as colmap_utils
 import utils.opt as opt_utils
+from tqdm import tqdm
 from datetime import datetime
-from utils.umeyama import umeyama
 from utils.metric_torch import evaluate_auc, evaluate_pcd
 
-from tqdm import tqdm
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_ratio
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -43,11 +39,11 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track
 
 torch._dynamo.config.accumulated_cache_size_limit = 512
 
-def run_VGGT(images, device, dtype):
+def run_VGGT(images, device, dtype, chunk_size):
     # images: [B, 3, H, W]
 
     # Run VGGT for camera and depth estimation
-    model = VGGT()
+    model = VGGT(chunk_size=chunk_size)
     _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
     model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
     model.eval()
@@ -68,19 +64,16 @@ def run_VGGT(images, device, dtype):
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
-    parser.add_argument("--post_fix", type=str, required=True, help="post fix for the output directory")
+    parser.add_argument("--post_fix", type=str, default="_vggt_x", help="Post fix for the output folder")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--use_opt", action="store_true", default=False, help="Use pose optimization for reconstruction")
-    parser.add_argument("--save_depth_only", action="store_true", default=False, help="If only save depth")
-    ######### BA parameters #########
-    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
-    parser.add_argument("--camera_type", type=str, default="SIMPLE_PINHOLE", help="Camera type for reconstruction")
+    parser.add_argument("--use_ga", action="store_true", default=False, help="Whether to apply global alignment for better reconstruction")
+    parser.add_argument("--save_depth", action="store_true", default=False, help="If save depth")
+    parser.add_argument("--chunk_size", type=int, default=512, help="Chunk size for frame-wise operation in VGGT")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
+    ######### GA parameters #########
     parser.add_argument("--max_query_pts", type=int, default=None, help="Maximum number of query points")
-    parser.add_argument("--gt_intr", action="store_true", default=False, help="Replace the estimated intrinsic with ground truth intrinsics")
-    parser.add_argument(
-        "--overwrite_pcd", action="store_true", default=False, help="Overwrite the point cloud with ground truth points"
-    )
+    parser.add_argument("--max_points_for_colmap", type=int, default=500000, help="Maximum number for colmap point cloud")
+    parser.add_argument("--shared_camera", action="store_true", default=False, help="Use shared camera for all images")
     return parser.parse_args()
 
 def demo_fn(args):
@@ -91,7 +84,6 @@ def demo_fn(args):
     os.makedirs(target_scene_dir, exist_ok=True)
 
     # Set seed for reproducibility
-    random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -144,22 +136,22 @@ def demo_fn(args):
 
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype)
+    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(images, device, dtype, args.chunk_size)
     
     images = images.to(device)
     
-    if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
-        print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
-        match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
-    else:
-        if args.max_query_pts is None:
-            args.max_query_pts = 4096 if len(images) < 500 else 2048
-        match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
-        match_outputs["original_width"] = images.shape[-1]
-        match_outputs["original_height"] = images.shape[-2]
-        torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
-        print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
-    if args.use_opt:
+    if args.use_ga:
+        if os.path.exists(os.path.join(target_scene_dir, "matches.pt")):
+            print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
+            match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
+        else:
+            if args.max_query_pts is None:
+                args.max_query_pts = 4096 if len(images) < 500 else 2048
+            match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
+            match_outputs["original_width"] = images.shape[-1]
+            match_outputs["original_height"] = images.shape[-2]
+            torch.save(match_outputs, os.path.join(target_scene_dir, "matches.pt"))
+            print(f"Saved matches to {os.path.join(target_scene_dir, 'matches.pt')}")
         extrinsic, intrinsic = opt_utils.pose_optimization(
             match_outputs, extrinsic, intrinsic, images, depth_map, depth_conf,
             base_image_path_list, target_scene_dir=target_scene_dir, shared_intrinsics=args.shared_camera,
@@ -170,7 +162,6 @@ def demo_fn(args):
 
     conf_thres_value = np.percentile(depth_conf, 0.5)
     print(f"Using confidence threshold: {conf_thres_value}")
-    max_points_for_colmap = 500000  # randomly sample 3D points
     shared_camera = False  # in the feedforward manner, we do not support shared camera
     camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
 
@@ -180,7 +171,6 @@ def demo_fn(args):
 
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
         pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
-        # max_points_for_colmap = len(pcd_gt)  # use the number of points in the ground truth as the limit
 
         if images_gt_updated is not None:
             from utils.umeyama import umeyama
@@ -237,23 +227,20 @@ def demo_fn(args):
         print("No ground truth points3D.bin found, using random sampling")
         points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
-    # save depth_map and depth_conf as .npy files
-    # target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
-    # target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
-    # os.makedirs(target_depth_dir, exist_ok=True)
-    # os.makedirs(target_conf_dir, exist_ok=True)
+    if args.save_depth:
+        # save depth_map and depth_conf as .npy files
+        target_depth_dir = os.path.join(target_scene_dir, "estimated_depths")
+        target_conf_dir = os.path.join(target_scene_dir, "estimated_confs")
+        os.makedirs(target_depth_dir, exist_ok=True)
+        os.makedirs(target_conf_dir, exist_ok=True)
 
-    # for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
-    #     inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
-    #     normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
-    #     depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
-    #     depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
-    #     np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
-    #     np.save(depth_conf_path, depth_conf[idx].squeeze())
-    
-    # print(f"Saved depth maps and confidences to {target_depth_dir} and {target_conf_dir}")
-    # if args.save_depth_only:
-    #     return True
+        for idx, image_path in tqdm(enumerate(image_path_list), desc="Saving depth maps and confidences"):
+            inverse_depth_map = 1 / (depth_map[idx] + 1e-8)  # Avoid division by zero
+            normalized_inverse_depth_map = (inverse_depth_map - inverse_depth_map.min()) / (inverse_depth_map.max() - inverse_depth_map.min())
+            depth_map_path = os.path.join(target_depth_dir, f"{os.path.basename(image_path)}.npy")
+            depth_conf_path = os.path.join(target_conf_dir, f"{os.path.basename(image_path)}.npy")
+            np.save(depth_map_path, normalized_inverse_depth_map.squeeze())
+            np.save(depth_conf_path, depth_conf[idx].squeeze())
 
     image_size = np.array([depth_map.shape[1], depth_map.shape[2]])
     num_frames, height, width, _ = points_3d.shape
@@ -267,7 +254,7 @@ def demo_fn(args):
     # (S, H, W, 3), with x, y coordinates and frame indices
     points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
 
-    if args.use_opt:
+    if args.use_ga:
         conf_mask = np.zeros_like(depth_conf, dtype=bool)
         corr_points_i = np.round(match_outputs["corr_points_i"].cpu().numpy()).astype(int)
         corr_points_j = np.round(match_outputs["corr_points_j"].cpu().numpy()).astype(int)
@@ -282,11 +269,11 @@ def demo_fn(args):
                 single_mask = (corr_weights[j] > 0.1)
                 conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
         conf_mask = conf_mask & (depth_conf >= conf_thres_value)
-        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+        conf_mask = randomly_limit_trues(conf_mask, args.max_points_for_colmap)
     else:
         conf_mask = depth_conf >= conf_thres_value
-        # at most writing max_points_for_colmap 3d points to colmap reconstruction object
-        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+        # at most writing args.max_points_for_colmap 3d points to colmap reconstruction object
+        conf_mask = randomly_limit_trues(conf_mask, args.max_points_for_colmap)
 
     points_3d = points_3d[conf_mask]
     points_xyf = points_xyf[conf_mask]

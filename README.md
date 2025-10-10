@@ -1,136 +1,91 @@
-<div align="center">
-<h1>VGGT: Visual Geometry Grounded Transformer</h1>
+<p align="center">
+  <h1 align="center"><strong> <img src="assets/72.png" width="30" height="30">  VGGT-X: When VGGT Meets Dense Novel View Synthesis</strong></h1>
 
-<a href="https://jytime.github.io/data/VGGT_CVPR25.pdf" target="_blank" rel="noopener noreferrer">
-  <img src="https://img.shields.io/badge/Paper-VGGT" alt="Paper PDF">
-</a>
-<a href="https://arxiv.org/abs/2503.11651"><img src="https://img.shields.io/badge/arXiv-2503.11651-b31b1b" alt="arXiv"></a>
-<a href="https://vgg-t.github.io/"><img src="https://img.shields.io/badge/Project_Page-green" alt="Project Page"></a>
-<a href='https://huggingface.co/spaces/facebook/vggt'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue'></a>
+  <p align="center">
+    <em>Institute of Automation, Chinese Academy of Sciences; University of Chinese Academy of Sciences; Linketic</em>
+  </p>
 
+</p>
 
-**[Visual Geometry Group, University of Oxford](https://www.robots.ox.ac.uk/~vgg/)**; **[Meta AI](https://ai.facebook.com/research/)**
+<div id="top" align="center">
 
+[![arXiv](https://img.shields.io/badge/arXiv-2509.25191-b31b1b.svg)](http://arxiv.org/abs/2509.25191)
+[![](https://img.shields.io/badge/%F0%9F%9A%80%20-Project%20Page-blue)](https://dekuliutesla.github.io/vggt-x.github.io/)
 
-[Jianyuan Wang](https://jytime.github.io/), [Minghao Chen](https://silent-chen.github.io/), [Nikita Karaev](https://nikitakaraevv.github.io/), [Andrea Vedaldi](https://www.robots.ox.ac.uk/~vedaldi/), [Christian Rupprecht](https://chrirupp.github.io/), [David Novotny](https://d-novotny.github.io/)
 </div>
 
-```bibtex
-@inproceedings{wang2025vggt,
-  title={VGGT: Visual Geometry Grounded Transformer},
-  author={Wang, Jianyuan and Chen, Minghao and Karaev, Nikita and Vedaldi, Andrea and Rupprecht, Christian and Novotny, David},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2025}
-}
-```
-
-## Updates
-- [July 6, 2025] Training code is now available in the `training` folder, including an example to finetune VGGT on a custom dataset. 
+<div align="center">
+    <img src="assets/teaser.png">
+</div>
 
 
-- [June 13, 2025] Honored to receive the Best Paper Award at CVPR 2025! Apologies if I’m slow to respond to queries or GitHub issues these days. If you’re interested, our oral presentation is available [here](https://docs.google.com/presentation/d/1JVuPnuZx6RgAy-U5Ezobg73XpBi7FrOh/edit?usp=sharing&ouid=107115712143490405606&rtpof=true&sd=true). Another long presentation can be found [here](https://docs.google.com/presentation/d/1aSv0e5PmH1mnwn2MowlJIajFUYZkjqgw/edit?usp=sharing&ouid=107115712143490405606&rtpof=true&sd=true) (Note: it’s shared in .pptx format with animations — quite large, but feel free to use it as a template if helpful.)
+## 📰 News
+**[2025.09.30]** arXiv release of our VGGT-X!
 
 
-- [June 2, 2025] Added a script to run VGGT and save predictions in COLMAP format, with bundle adjustment support optional. The saved COLMAP files can be directly used with [gsplat](https://github.com/nerfstudio-project/gsplat) or other NeRF/Gaussian splatting libraries.
+## 💡 Overview
 
+<div align="center">
+    <img src='assets/pipeline.png'/>
+</div>
 
-- [May 3, 2025] Evaluation code for reproducing our camera pose estimation results on Co3D is now available in the [evaluation](https://github.com/facebookresearch/vggt/tree/evaluation) branch. 
+<b>VGGT-X</b> takes dense multi-view images as input. It first uses memory-efficient VGGT to losslessly predict 3D key attributes, which we name as VGGT--. Then, a fast global alignment module refines the predicted camera poses and point clouds. Finally, a robust joint pose and 3DGS training pipeline is applied to produce high-fidelity novel view synthesis.
 
+## ⚡ Quick Start
 
-## Overview
-
-Visual Geometry Grounded Transformer (VGGT, CVPR 2025) is a feed-forward neural network that directly infers all key 3D attributes of a scene, including extrinsic and intrinsic camera parameters, point maps, depth maps, and 3D point tracks, **from one, a few, or hundreds of its views, within seconds**.
-
-
-## Quick Start
-
-First, clone this repository to your local machine, and install the dependencies (torch, torchvision, numpy, Pillow, and huggingface_hub). 
+First, clone this repository to your local machine, and install the dependencies. 
 
 ```bash
-git clone git@github.com:facebookresearch/vggt.git 
-cd vggt
+git clone https://github.com/Linketic/VGGT-X.git 
+cd VGGT-X
+conda create -n vggt_x python=3.10
+conda activate vggt_x
 pip install -r requirements.txt
 ```
 
-Alternatively, you can install VGGT as a package (<a href="docs/package.md">click here</a> for details).
+Now, put the image collection to path/to/your/scene/images. Please ensure that the images are stored in `/YOUR/SCENE_DIR/images/`. This folder should contain only the images. Then run the model and get COLMAP results:
 
-
-Now, try the model with just a few lines of code:
-
-```python
-import torch
-from vggt.models.vggt import VGGT
-from vggt.utils.load_fn import load_and_preprocess_images
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-# bfloat16 is supported on Ampere GPUs (Compute Capability 8.0+) 
-dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-
-# Initialize the model and load the pretrained weights.
-# This will automatically download the model weights the first time it's run, which may take a while.
-model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
-
-# Load and preprocess example images (replace with your own image paths)
-image_names = ["path/to/imageA.png", "path/to/imageB.png", "path/to/imageC.png"]  
-images = load_and_preprocess_images(image_names).to(device)
-
-with torch.no_grad():
-    with torch.cuda.amp.autocast(dtype=dtype):
-        # Predict attributes including cameras, depth maps, and point maps.
-        predictions = model(images)
+```bash
+python demo_colmap.py --scene_dir path/to/your/scene --shared_camera --use_opt
 ```
 
-The model weights will be automatically downloaded from Hugging Face. If you encounter issues such as slow loading, you can manually download them [here](https://huggingface.co/facebook/VGGT-1B/blob/main/model.pt) and load, or:
+The reconstruction result (camera parameters and 3D points) will be automatically saved under `/YOUR/SCENE_DIR_vggt_x/sparse/` in the COLMAP format (currently only supports `PINHOLE` camera type), such as:
 
-```python
-model = VGGT()
-_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+``` 
+SCENE_DIR/
+  └── images/
+SCENE_DIR_vggt_x/
+  ├── images/
+  └── sparse/
+      ├── cameras.bin
+      ├── images.bin
+      └── points3D.bin
 ```
+Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder `/YOUR/SCENE_DIR_vggt_x/`, except for the `sparse/` folder. It minimizes additional storage usage and facilitates usage of reconstruction results.
 
-## Detailed Usage
+## 🔍 Detailed Usage
 
 <details>
 <summary>Click to expand</summary>
 
-You can also optionally choose which attributes (branches) to predict, as shown below. This achieves the same result as the example above. This example uses a batch size of 1 (processing a single scene), but it naturally works for multiple scenes.
-
-```python
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from vggt.utils.geometry import unproject_depth_map_to_point_map
-
-with torch.no_grad():
-    with torch.cuda.amp.autocast(dtype=dtype):
-        images = images[None]  # add batch dimension
-        aggregated_tokens_list, ps_idx = model.aggregator(images)
-                
-    # Predict Cameras
-    pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-    # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-
-    # Predict Depth Maps
-    depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
-
-    # Predict Point Maps
-    point_map, point_conf = model.point_head(aggregated_tokens_list, images, ps_idx)
-        
-    # Construct 3D Points from Depth Maps and Cameras
-    # which usually leads to more accurate 3D points than point map branch
-    point_map_by_unprojection = unproject_depth_map_to_point_map(depth_map.squeeze(0), 
-                                                                extrinsic.squeeze(0), 
-                                                                intrinsic.squeeze(0))
-
-    # Predict Tracks
-    # choose your own points to track, with shape (N, 2) for one scene
-    query_points = torch.FloatTensor([[100.0, 200.0], 
-                                        [60.72, 259.94]]).to(device)
-    track_list, vis_score, conf_score = model.track_head(aggregated_tokens_list, images, ps_idx, query_points=query_points[None])
-```
-
-
-Furthermore, if certain pixels in the input frames are unwanted (e.g., reflective surfaces, sky, or water), you can simply mask them by setting the corresponding pixel values to 0 or 1. Precise segmentation masks aren't necessary - simple bounding box masks work effectively (check this [issue](https://github.com/facebookresearch/vggt/issues/47) for an example).
-
+  #### --post_fix
+  Post fix for the output folder (`_vggt_x` by default). You can set any desired name for the output folder.
+  #### --seed
+  Random seed for reproducibility.
+  #### --use_ga
+  If specified, the global alignment will be applied to VGGT output for better reconstruction. The matching results would be saved to `/YOUR/SCENE_DIR_vggt_x/matches.pt`.
+  #### --save_depth
+  If specified, it would save the depth and confidence to `/YOUR/SCENE_DIR_vggt_x/estimated_depths/` and `/YOUR/SCENE_DIR_vggt_x/estimated_confs/` as .npy files.
+  #### --total_frame_num
+  If specified, it would use first the `total_frame_num` images for reconstruction. Otherwise, all images will be considered in processing.
+  #### --chunk_size
+  Chunk size for frame-wise operation in VGGT. Default value is 512. **You can specify a smaller value to release VGGT computation burden**.
+  #### --max_query_pts
+  Maximum query points for XFeat matching. For each pair, XFeat would generate `max_query_pts` matches. If not specified, it is set to 4096 if number of images is less than 500 and 2048 otherwise. **You can specify a smaller value to release GA computation burden**.
+  #### --max_points_for_colmap
+  Maximum number for colmap point cloud. Default value is 500000.
+  #### --shared_camera
+  If specified, it would use shared camera for all images.
 </details>
 
 
@@ -171,37 +126,6 @@ Run the following command to run reconstruction and visualize the point clouds i
 python demo_viser.py --image_folder path/to/your/images/folder
 ```
 
-## Exporting to COLMAP Format
-
-We also support exporting VGGT's predictions directly to COLMAP format, by:
-
-```bash 
-# Feedforward prediction only
-python demo_colmap.py --scene_dir=/YOUR/SCENE_DIR/ 
-
-# With bundle adjustment
-python demo_colmap.py --scene_dir=/YOUR/SCENE_DIR/ --use_ba
-
-# Run with bundle adjustment using reduced parameters for faster processing
-# Reduces max_query_pts from 4096 (default) to 2048 and query_frame_num from 8 (default) to 5
-# Trade-off: Faster execution but potentially less robust reconstruction in complex scenes (you may consider setting query_frame_num equal to your total number of images) 
-# See demo_colmap.py for additional bundle adjustment configuration options
-python demo_colmap.py --scene_dir=/YOUR/SCENE_DIR/ --use_ba --max_query_pts=2048 --query_frame_num=5
-```
-
-Please ensure that the images are stored in `/YOUR/SCENE_DIR/images/`. This folder should contain only the images. Check the examples folder for the desired data structure. 
-
-The reconstruction result (camera parameters and 3D points) will be automatically saved under `/YOUR/SCENE_DIR/sparse/` in the COLMAP format, such as:
-
-``` 
-SCENE_DIR/
-├── images/
-└── sparse/
-    ├── cameras.bin
-    ├── images.bin
-    └── points3D.bin
-```
-
 ## Integration with Gaussian Splatting
 
 
@@ -212,16 +136,6 @@ An example command to train the model is:
 cd gsplat
 python examples/simple_trainer.py  default --data_factor 1 --data_dir /YOUR/SCENE_DIR/ --result_dir /YOUR/RESULT_DIR/
 ```
-
-
-
-## Zero-shot Single-view Reconstruction
-
-Our model shows surprisingly good performance on single-view reconstruction, although it was never trained for this task. The model does not need to duplicate the single-view image to a pair, instead, it can directly infer the 3D structure from the tokens of the single view image. Feel free to try it with our demos above, which naturally works for single-view reconstruction.
-
-
-We did not quantitatively test monocular depth estimation performance ourselves, but [@kabouzeid](https://github.com/kabouzeid) generously provided a comparison of VGGT to recent methods [here](https://github.com/facebookresearch/vggt/issues/36). VGGT shows competitive or better results compared to state-of-the-art monocular approaches such as DepthAnything v2 or MoGe, despite never being explicitly trained for single-view tasks. 
-
 
 
 ## Runtime and GPU Memory
@@ -236,39 +150,6 @@ We benchmark the runtime and GPU memory usage of VGGT's aggregator on a single N
 Note that these results were obtained using Flash Attention 3, which is faster than the default Flash Attention 2 implementation while maintaining almost the same memory usage. Feel free to compile Flash Attention 3 from source to get better performance.
 
 
-## Research Progression
-
-Our work builds upon a series of previous research projects. If you're interested in understanding how our research evolved, check out our previous works:
-
-
-<table border="0" cellspacing="0" cellpadding="0">
-  <tr>
-    <td align="left">
-      <a href="https://github.com/jytime/Deep-SfM-Revisited">Deep SfM Revisited</a>
-    </td>
-    <td style="white-space: pre;">──┐</td>
-    <td></td>
-  </tr>
-  <tr>
-    <td align="left">
-      <a href="https://github.com/facebookresearch/PoseDiffusion">PoseDiffusion</a>
-    </td>
-    <td style="white-space: pre;">─────►</td>
-    <td>
-      <a href="https://github.com/facebookresearch/vggsfm">VGGSfM</a> ──►
-      <a href="https://github.com/facebookresearch/vggt">VGGT</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="left">
-      <a href="https://github.com/facebookresearch/co-tracker">CoTracker</a>
-    </td>
-    <td style="white-space: pre;">──┘</td>
-    <td></td>
-  </tr>
-</table>
-
-
 ## Acknowledgements
 
 Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookresearch/PoseDiffusion), [VGGSfM](https://github.com/facebookresearch/vggsfm), [CoTracker](https://github.com/facebookresearch/co-tracker), [DINOv2](https://github.com/facebookresearch/dinov2), [Dust3r](https://github.com/naver/dust3r), [Moge](https://github.com/microsoft/moge), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [Sky Segmentation](https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), [Metric3D](https://github.com/YvanYin/Metric3D) and many other inspiring works in the community.
@@ -281,3 +162,16 @@ Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookr
 
 ## License
 See the [LICENSE](./LICENSE.txt) file for details about the license under which this code is made available.
+
+## 🤗 Citation
+If you find this repository useful for your research, please use the following BibTeX entry for citation.
+
+    @misc{liu2025vggtxvggtmeetsdense,
+          title={VGGT-X: When VGGT Meets Dense Novel View Synthesis}, 
+          author={Yang Liu and Chuanchen Luo and Zimo Tang and Junran Peng and Zhaoxiang Zhang},
+          year={2025},
+          eprint={2509.25191},
+          archivePrefix={arXiv},
+          primaryClass={cs.CV},
+          url={https://arxiv.org/abs/2509.25191}, 
+    }

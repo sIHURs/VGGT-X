@@ -25,7 +25,7 @@ def infer_layer_norm(x, w, b, dims, eps):
     x /= torch.sqrt((x**2).mean(dims, True) + eps)
     x *= w
     x += b
-
+ 
 def infer_norm(norm_layer, x):
     # torch.cuda.empty_cache()
     if isinstance(norm_layer, nn.LayerNorm):

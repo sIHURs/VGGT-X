@@ -5,5 +5,11 @@ Pillow
 huggingface_hub
 einops
 safetensors
+opencv-python
+open3d
 evo
 roma
+kornia
+trimesh
+matplotlib
+pycolmap
