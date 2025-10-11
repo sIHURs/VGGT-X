@@ -1,5 +1,6 @@
 import random
 import time
+import argparse
 from pathlib import Path
 from typing import List
 
@@ -16,24 +17,32 @@ from viser.extras.colmap import (
     read_points3d_binary,
 )
 
+parser = argparse.ArgumentParser(description="VGGT-X demo with viser for 3D visualization")
+parser.add_argument(
+    "--colmap_path", "-c", type=str, default="path/to/scene/sparse/0", help="Path to predicted colmap results")
+parser.add_argument(
+    "--colmap_ref_path", "-r", type=str, default=None, help="Path to ground truth colmap results")
+parser.add_argument(
+    "--images_path", "-i", type=str, default=None, help="Path to the images")
+parser.add_argument("--downsample_factor", type=int, default=2, help="Downsample factor for the images")
+parser.add_argument("--no_reorient", action="store_true", help="Do not reorient the scene based on average camera up direction")
 
-def main(
-    colmap_path: Path = Path(__file__).parent / "data/TNT_GOF/TrainingSet_vggt_opt/Courthouse/sparse/0",
-    colmap_ref_path: Path = Path(__file__).parent / "data/TNT_GOF/TrainingSet/Courthouse/sparse/0",
-    images_path: Path = Path(__file__).parent / "data/TNT_GOF/TrainingSet_vggt_opt/Courthouse/images_2",
-    downsample_factor: int = 2,
-    reorient_scene: bool = True,
-) -> None:
+def main() -> None:
+    args = parser.parse_args()
+    args.colmap_path = Path(args.colmap_path)
+    args.colmap_ref_path = Path(args.colmap_ref_path) if args.colmap_ref_path else None
+    args.images_path = Path(args.images_path) if args.images_path else None
+
     server = viser.ViserServer()
     server.gui.configure_theme(titlebar_content=None, control_layout="collapsible")
 
     # Load the colmap info.
-    cameras = read_cameras_binary(colmap_path / "cameras.bin")
-    images = read_images_binary(colmap_path / "images.bin")
-    points3d = read_points3d_binary(colmap_path / "points3D.bin")
+    cameras = read_cameras_binary(args.colmap_path / "cameras.bin")
+    images = read_images_binary(args.colmap_path / "images.bin")
+    points3d = read_points3d_binary(args.colmap_path / "points3D.bin")
 
-    cameras_ref = read_cameras_binary(colmap_ref_path / "cameras.bin")
-    images_ref = read_images_binary(colmap_ref_path / "images.bin")
+    cameras_ref = read_cameras_binary(args.colmap_ref_path / "cameras.bin") if args.colmap_ref_path else None
+    images_ref = read_images_binary(args.colmap_ref_path / "images.bin") if args.colmap_ref_path else None
 
     points = np.array([points3d[p_id].xyz for p_id in points3d])
     colors = np.array([points3d[p_id].rgb for p_id in points3d])
@@ -44,7 +53,7 @@ def main(
     )
 
     # Let's rotate the scene so the average camera direction is pointing up.
-    if reorient_scene:
+    if not args.no_reorient:
         average_up = (
             vtf.SO3(np.array([img.qvec for img in images.values()]))
             @ np.array([0.0, -1.0, 0.0])  # -y is up in the local frame!
@@ -108,30 +117,19 @@ def main(
             img = images[img_id]
             cam = cameras[img.camera_id]
 
-            # Skip images that don't exist.
-            image_filename = images_path / img.name
-            if not image_filename.exists():
-                continue
+            if args.images_path is not None:
+                image_filename = args.images_path / img.name
+                # Skip images that don't exist.
+                if not image_filename.exists():
+                    continue
+                image = iio.imread(image_filename)
+                image = image[::args.downsample_factor, ::args.downsample_factor]
+            else:
+                image = None
 
             T_world_camera = vtf.SE3.from_rotation_and_translation(
                 vtf.SO3(img.qvec), img.tvec
             ).inverse()
-
-            img_ref = images_ref[img_id]
-            cam_ref = cameras_ref[img_ref.camera_id]
-
-            # Skip images that don't exist.
-            image_filename_ref = images_path / img_ref.name
-            if not image_filename_ref.exists():
-                continue
-
-            T_world_camera_ref = vtf.SE3.from_rotation_and_translation(
-                vtf.SO3(img_ref.qvec), img_ref.tvec
-            ).inverse()
-
-            # for teaser demo
-            # if np.max(np.abs(T_world_camera_ref.translation() - T_world_camera.translation())) > 0.05:
-            #     continue
 
             frame = server.scene.add_frame(
                 f"/colmap/frame_{img_id}",
@@ -149,15 +147,13 @@ def main(
 
             H, W = cam.height, cam.width
             fy = cam.params[1]
-            # image = iio.imread(image_filename)
-            # image = image[::downsample_factor, ::downsample_factor]
             frustum = server.scene.add_camera_frustum(
                 f"/colmap/frame_{img_id}/frustum",
                 fov=2 * np.arctan2(H / 2, fy),
                 aspect=W / H,
                 scale=0.02,
                 color=(255, 0, 0),
-                # image=image,
+                image=image,
             )
             frustums.append(frustum)
 
@@ -167,40 +163,46 @@ def main(
                     client.camera.wxyz = frame.wxyz
                     client.camera.position = frame.position
             
-            # for teaser demo
-            # frame_ref = server.scene.add_frame(
-            #     f"/colmap_ref/frame_{img_id}",
-            #     wxyz=T_world_camera_ref.rotation().wxyz,
-            #     position=T_world_camera_ref.translation(),
-            #     axes_length=0.1,
-            #     axes_radius=0.005,
-            #     show_axes=False,
-            # )
-            # frames.append(frame_ref)
+            if args.colmap_ref_path is None:
+                continue
+
+            img_ref = images_ref[img_id]
+            cam_ref = cameras_ref[img_ref.camera_id]
+
+            T_world_camera_ref = vtf.SE3.from_rotation_and_translation(
+                vtf.SO3(img_ref.qvec), img_ref.tvec
+            ).inverse()
+
+            frame_ref = server.scene.add_frame(
+                f"/colmap_ref/frame_{img_id}",
+                wxyz=T_world_camera_ref.rotation().wxyz,
+                position=T_world_camera_ref.translation(),
+                axes_length=0.1,
+                axes_radius=0.005,
+                show_axes=False,
+            )
+            frames.append(frame_ref)
 
             # For pinhole cameras, cam.params will be (fx, fy, cx, cy).
-            # if cam_ref.model != "PINHOLE":
-            #     print(f"Expected pinhole camera, but got {cam_ref.model}")
+            if cam_ref.model != "PINHOLE":
+                print(f"Expected pinhole camera, but got {cam_ref.model}")
 
-            # H, W = cam_ref.height, cam_ref.width
-            # fy = cam_ref.params[1]
-            # # image = iio.imread(image_filename)
-            # # image = image[::downsample_factor, ::downsample_factor]
-            # frustum_ref = server.scene.add_camera_frustum(
-            #     f"/colmap_ref/frame_{img_id}/frustum",
-            #     fov=2 * np.arctan2(H / 2, fy),
-            #     aspect=W / H,
-            #     scale=0.02,
-            #     color=(0, 255, 255),
-            #     # image=image,
-            # )
-            # frustums.append(frustum_ref)
+            H, W = cam_ref.height, cam_ref.width
+            fy = cam_ref.params[1]
+            frustum_ref = server.scene.add_camera_frustum(
+                f"/colmap_ref/frame_{img_id}/frustum",
+                fov=2 * np.arctan2(H / 2, fy),
+                aspect=W / H,
+                scale=0.02,
+                color=(0, 255, 255),
+            )
+            frustums.append(frustum_ref)
 
-            # @frustum_ref.on_click
-            # def _(_, frame_ref=frame_ref) -> None:
-            #     for client in server.get_clients().values():
-            #         client.camera.wxyz = frame_ref.wxyz
-            #         client.camera.position = frame_ref.position
+            @frustum_ref.on_click
+            def _(_, frame_ref=frame_ref) -> None:
+                for client in server.get_clients().values():
+                    client.camera.wxyz = frame_ref.wxyz
+                    client.camera.position = frame_ref.position
 
     need_update = True
 
@@ -234,4 +236,4 @@ def main(
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main()

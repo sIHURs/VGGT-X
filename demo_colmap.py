@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_ga", action="store_true", default=False, help="Whether to apply global alignment for better reconstruction")
     parser.add_argument("--save_depth", action="store_true", default=False, help="If save depth")
-    parser.add_argument("--chunk_size", type=int, default=512, help="Chunk size for frame-wise operation in VGGT")
+    parser.add_argument("--chunk_size", type=int, default=256, help="Chunk size for frame-wise operation in VGGT")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
     ######### GA parameters #########
     parser.add_argument("--max_query_pts", type=int, default=None, help="Maximum number of query points")
@@ -207,7 +207,7 @@ def demo_fn(args):
                 img_load_resolution, conf_thresh=1.5 if depth_conf.max() > 1.5 else conf_thres_value,
             )
 
-            result_file = os.path.join(target_scene_dir, "vggt_results.txt")
+            result_file = os.path.join(target_scene_dir, "eval_results.txt")
             with open(result_file, "w") as f:
                 f.write(f"Image Count: {len(images_gt_updated)},\n")
                 f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']},\n")

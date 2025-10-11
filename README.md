@@ -20,7 +20,7 @@
 
 
 ## 📰 News
-**[2025.09.30]** arXiv release of our VGGT-X!
+**[2025.09.30]** Paper release of our VGGT-X on arXiv!
 
 
 ## 💡 Overview
@@ -29,7 +29,7 @@
     <img src='assets/pipeline.png'/>
 </div>
 
-<b>VGGT-X</b> takes dense multi-view images as input. It first uses memory-efficient VGGT to losslessly predict 3D key attributes, which we name as VGGT--. Then, a fast global alignment module refines the predicted camera poses and point clouds. Finally, a robust joint pose and 3DGS training pipeline is applied to produce high-fidelity novel view synthesis.
+<b>VGGT-X</b> takes dense multi-view images as input. It first uses memory-efficient VGGT to losslessly predict 3D key attributes. Then, a fast global alignment module refines the predicted camera poses and point clouds. Finally, a robust joint pose and 3DGS training pipeline is applied to produce high-fidelity novel view synthesis.
 
 ## ⚡ Quick Start
 
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 Now, put the image collection to path/to/your/scene/images. Please ensure that the images are stored in `/YOUR/SCENE_DIR/images/`. This folder should contain only the images. Then run the model and get COLMAP results:
 
 ```bash
-python demo_colmap.py --scene_dir path/to/your/scene --shared_camera --use_opt
+python demo_colmap.py --scene_dir /YOUR/SCENE_DIR --shared_camera --use_opt
 ```
 
 The reconstruction result (camera parameters and 3D points) will be automatically saved under `/YOUR/SCENE_DIR_vggt_x/sparse/` in the COLMAP format (currently only supports `PINHOLE` camera type), such as:
@@ -61,7 +61,8 @@ SCENE_DIR_vggt_x/
       ├── images.bin
       └── points3D.bin
 ```
-Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder `/YOUR/SCENE_DIR_vggt_x/`, except for the `sparse/` folder. It minimizes additional storage usage and facilitates usage of reconstruction results.
+
+Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder `/YOUR/SCENE_DIR_vggt_x/`, except for the `sparse/` folder. It minimizes additional storage usage and facilitates usage of reconstruction results. If `/YOUR/SCENE_DIR/sparse/` exists, it would take it as ground-truth and save pose and point map evaluation result to `/YOUR/SCENE_DIR_vggt_x/sparse/eval_results.txt`.
 
 ## 🔍 Detailed Usage
 
@@ -89,42 +90,28 @@ Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder 
 </details>
 
 
-## Interactive Demo
+## 💻 Viser 3D Viewer
 
-We provide multiple ways to visualize your 3D reconstructions. Before using these visualization tools, install the required dependencies:
-
-```bash
-pip install -r requirements_demo.txt
-```
-
-### Interactive 3D Visualization
-
-**Please note:** VGGT typically reconstructs a scene in less than 1 second. However, visualizing 3D points may take tens of seconds due to third-party rendering, independent of VGGT's processing time. The visualization is slow especially when the number of images is large.
-
-
-#### Gradio Web Interface
-
-Our Gradio-based interface allows you to upload images/videos, run reconstruction, and interactively explore the 3D scene in your browser. You can launch this in your local machine or try it on [Hugging Face](https://huggingface.co/spaces/facebook/vggt).
-
+Considering the loading and processing of hundreds of images cannot be immediately finished, we provide offline visualization through viser.
 
 ```bash
-python demo_gradio.py
+python colmap_viser.py \
+   -c /YOUR/SCENE_DIR_vggt_x/sparse/0 \
+   -i /YOUR/SCENE_DIR_vggt_x/images \
+   -r /YOUR/SCENE_DIR/sparse/0
 ```
+
+Note that `-i` and `-r` are optional. Set them when you want to show image along with the camera frustum or compare with the ground truth camera poses.
 
 <details>
-<summary>Click to preview the Gradio interactive interface</summary>
+<summary>Click to preview the Viser interactive interface</summary>
 
-![Gradio Web Interface Preview](https://jytime.github.io/data/vggt_hf_demo_screen.png)
+<div align="center">
+    <img src='assets/viser.png'/>
+</div>
+
 </details>
 
-
-#### Viser 3D Viewer
-
-Run the following command to run reconstruction and visualize the point clouds in viser. Note this script requires a path to a folder containing images. It assumes only image files under the folder. You can set `--use_point_map` to use the point cloud from the point map branch, instead of the depth-based point cloud.
-
-```bash
-python demo_viser.py --image_folder path/to/your/images/folder
-```
 
 ## Integration with Gaussian Splatting
 
@@ -153,12 +140,6 @@ Note that these results were obtained using Flash Attention 3, which is faster t
 ## Acknowledgements
 
 Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookresearch/PoseDiffusion), [VGGSfM](https://github.com/facebookresearch/vggsfm), [CoTracker](https://github.com/facebookresearch/co-tracker), [DINOv2](https://github.com/facebookresearch/dinov2), [Dust3r](https://github.com/naver/dust3r), [Moge](https://github.com/microsoft/moge), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [Sky Segmentation](https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), [Metric3D](https://github.com/YvanYin/Metric3D) and many other inspiring works in the community.
-
-## Checklist
-
-- [x] Release the training code
-- [ ] Release VGGT-500M and VGGT-200M
-
 
 ## License
 See the [LICENSE](./LICENSE.txt) file for details about the license under which this code is made available.
