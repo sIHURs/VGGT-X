@@ -4,13 +4,31 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import random
+import os
 import numpy as np
 import torch
 import math
 import open3d as o3d
 from tqdm import tqdm
 from typing import Tuple
+
+def write_evaluation_results(target_dir: str, images_count: int, auc_results: dict, pcd_results: dict, inference_time_s: float, peak_mem_mb: float) -> None:
+    result_file = os.path.join(target_dir, "eval_results.txt")
+    with open(result_file, "w") as f:
+        f.write(f"Image Count: {images_count},\n")
+        f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']},\n")
+        f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']},\n")
+        f.write(f"Racc_5: {auc_results['Racc_5']},\n")
+        f.write(f"Racc_15: {auc_results['Racc_15']},\n")
+        f.write(f"Tacc_5: {auc_results['Tacc_5']},\n")
+        f.write(f"Tacc_15: {auc_results['Tacc_15']},\n")
+        f.write(f"AUC at 30 degrees: {auc_results['Auc_30']},\n")
+        f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']},\n")
+        f.write(f"Completeness Mean: {pcd_results['completeness_mean']},\n")
+        f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']},\n")
+        f.write(f"Inference Time: {inference_time_s},\n")
+        f.write(f"Peak Memory Usage (MB): {peak_mem_mb},\n")
+
 
 @torch.inference_mode()
 def evaluate_pcd(

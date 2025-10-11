@@ -18,11 +18,12 @@ torch.backends.cudnn.deterministic = False
 
 import argparse
 import trimesh
-import utils.colmap as colmap_utils
 import utils.opt as opt_utils
+import utils.colmap as colmap_utils
 from tqdm import tqdm
+from pathlib import Path
 from datetime import datetime
-from utils.metric_torch import evaluate_auc, evaluate_pcd
+from utils.metric_torch import evaluate_auc, evaluate_pcd, write_evaluation_results
 
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_ratio
@@ -31,13 +32,9 @@ from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap_wo_track
 
-# TODO: add support for masks
-# TODO: add iterative BA
-# TODO: add support for radial distortion, which needs extra_params
-# TODO: test with more cases
-# TODO: test different camera types
 
 torch._dynamo.config.accumulated_cache_size_limit = 512
+
 
 def run_VGGT(images, device, dtype, chunk_size):
     # images: [B, 3, H, W]
@@ -109,19 +106,23 @@ def demo_fn(args):
 
         if args.total_frame_num > len(images_gt):
             raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
+        
         images_gt = dict(list(images_gt.items())[:args.total_frame_num])
-
         images_gt_keys = list(images_gt.keys())
+
         random.shuffle(images_gt_keys)
         images_gt_updated = {id: images_gt[id] for id in list(images_gt_keys)}
         image_path_list = [os.path.join(image_dir, images_gt_updated[id].name) for id in images_gt_updated.keys()]
-        base_image_path_list = [os.path.basename(path) for path in image_path_list]
+
+        inverse_idx = [images_gt_keys.index(key) for key in sorted(list(images_gt.keys()))]
     else:
-        images_gt_updated = None
         image_path_list = sorted(glob.glob(os.path.join(image_dir, "*")))[:args.total_frame_num]
-        if len(image_path_list) == 0:
+        if not image_path_list:
             raise ValueError(f"No images found in {image_dir}")
-        base_image_path_list = [os.path.basename(path) for path in image_path_list]
+        inverse_idx = list(range(len(image_path_list)))
+
+    base_image_path_list = [os.path.basename(path) for path in image_path_list]
+    base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
 
     # Load images and original coordinates
     # Load Image in 1024, while running VGGT with 518
@@ -145,6 +146,7 @@ def demo_fn(args):
             print(f"Found existing matches at {os.path.join(target_scene_dir, 'matches.pt')}, loading it")
             match_outputs = torch.load(os.path.join(target_scene_dir, "matches.pt"))
         else:
+            print("Extracting matches for global alignment")
             if args.max_query_pts is None:
                 args.max_query_pts = 4096 if len(images) < 500 else 2048
             match_outputs = opt_utils.extract_matches(extrinsic, intrinsic, images, depth_conf, base_image_path_list, args.max_query_pts)
@@ -158,22 +160,22 @@ def demo_fn(args):
         )
         
     end_time = datetime.now()
-    max_memory = torch.cuda.max_memory_allocated() / (1024.0 ** 2)
+    peak_mem_mb = (torch.cuda.max_memory_allocated() / (1024 ** 2)) if torch.cuda.is_available() else 0.0
 
     conf_thres_value = np.percentile(depth_conf, 0.5)
     print(f"Using confidence threshold: {conf_thres_value}")
-    shared_camera = False  # in the feedforward manner, we do not support shared camera
-    camera_type = "PINHOLE"  # in the feedforward manner, we only support PINHOLE camera
+    shared_camera = False  # in colmap result saving, we do not support shared camera
+    camera_type = "PINHOLE"  # in colmap result saving, we only support PINHOLE camera
 
     c = 2.5  # scale factor for better reconstruction, hard-coded here
     extrinsic[:, :3, 3] *= c
     depth_map *= c
 
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/points3D.bin")):
+        print("Found ground truth colmap results, evaluating reconstruction quality")
         pcd_gt = colmap_utils.read_points3D_binary(os.path.join(args.scene_dir, "sparse/0/points3D.bin"))
 
         if images_gt_updated is not None:
-            from utils.umeyama import umeyama
 
             translation_gt = torch.tensor([image.tvec for image in images_gt_updated.values()], device=device)
             rotation_gt = torch.tensor([colmap_utils.qvec2rotmat(image.qvec) for image in images_gt_updated.values()], device=device)
@@ -190,7 +192,7 @@ def demo_fn(args):
 
             auc_results, pred_se3_aligned, c, R, t = evaluate_auc(pred_se3, gt_se3, device, return_aligned=True)
 
-            # align prediction to gt points, yielding lower results
+            # align prediction to gt points
             # extrinsic[:, :3, :3] = pred_se3_aligned[:, :3, :3].cpu().numpy()
             # extrinsic[:, :3, 3] = pred_se3_aligned[:, 3, :3].cpu().numpy()
             # depth_map *= c
@@ -207,21 +209,8 @@ def demo_fn(args):
                 img_load_resolution, conf_thresh=1.5 if depth_conf.max() > 1.5 else conf_thres_value,
             )
 
-            result_file = os.path.join(target_scene_dir, "eval_results.txt")
-            with open(result_file, "w") as f:
-                f.write(f"Image Count: {len(images_gt_updated)},\n")
-                f.write(f"Relative Rotation Error (degrees): {auc_results['rel_rangle_deg']},\n")
-                f.write(f"Relative Translation Error (degrees): {auc_results['rel_tangle_deg']},\n")
-                f.write(f"Racc_5: {auc_results['Racc_5']},\n")
-                f.write(f"Racc_15: {auc_results['Racc_15']},\n")
-                f.write(f"Tacc_5: {auc_results['Tacc_5']},\n")
-                f.write(f"Tacc_15: {auc_results['Tacc_15']},\n")
-                f.write(f"AUC at 30 degrees: {auc_results['Auc_30']},\n")
-                f.write(f"Accuracy Mean: {pcd_results['accuracy_mean']},\n")
-                f.write(f"Completeness Mean: {pcd_results['completeness_mean']},\n")
-                f.write(f"Chamfer Distance: {pcd_results['chamfer_distance']},\n")
-                f.write(f"Inference Time: {(end_time - start_time).total_seconds()},\n")
-                f.write(f"Peak Memory Usage (MB): {max_memory},\n")
+            write_evaluation_results(target_scene_dir, len(images_gt_updated), auc_results, pcd_results, 
+                                     (end_time - start_time).total_seconds(), peak_mem_mb)
             
     else:
         print("No ground truth points3D.bin found, using random sampling")
@@ -255,19 +244,7 @@ def demo_fn(args):
     points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
 
     if args.use_ga:
-        conf_mask = np.zeros_like(depth_conf, dtype=bool)
-        corr_points_i = np.round(match_outputs["corr_points_i"].cpu().numpy()).astype(int)
-        corr_points_j = np.round(match_outputs["corr_points_j"].cpu().numpy()).astype(int)
-        indexes_i = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_i"]]
-        indexes_j = [base_image_path_list.index(img_name) for img_name in match_outputs["image_names_j"]]
-        corr_weights = match_outputs["corr_weights"].cpu().numpy()
-        for i in range(len(indexes_i)):
-            single_mask = (corr_weights[i] > 0.1)
-            conf_mask[indexes_i[i], corr_points_i[i, single_mask[:, 0], 1], corr_points_i[i, single_mask[:, 0], 0]] = True
-        for j in range(len(indexes_j)):
-            if j not in indexes_i:
-                single_mask = (corr_weights[j] > 0.1)
-                conf_mask[indexes_j[j], corr_points_j[j, single_mask[:, 0], 1], corr_points_j[j, single_mask[:, 0], 0]] = True
+        conf_mask = opt_utils.extract_conf_mask(match_outputs, depth_conf, base_image_path_list)
         conf_mask = conf_mask & (depth_conf >= conf_thres_value)
         conf_mask = randomly_limit_trues(conf_mask, args.max_points_for_colmap)
     else:
@@ -278,9 +255,6 @@ def demo_fn(args):
     points_3d = points_3d[conf_mask]
     points_xyf = points_xyf[conf_mask]
     points_rgb = points_rgb[conf_mask]
-
-    inverse_idx = [images_gt_keys.index(key) for key in sorted(list(images_gt.keys()))]
-    base_image_path_list_inv = [base_image_path_list[i] for i in inverse_idx]
 
     print("Converting to COLMAP format")
     reconstruction = batch_np_matrix_to_pycolmap_wo_track(
@@ -338,10 +312,10 @@ if __name__ == "__main__":
 # Work in Progress (WIP)
 
 """
-VGGT Runner Script
+VGGT-X Runner Script
 =================
 
-A script to run the VGGT model for 3D reconstruction from image sequences.
+A script to run the VGGT-X model for 3D reconstruction from image sequences.
 
 Directory Structure
 ------------------
@@ -361,7 +335,7 @@ Output:
 
 Key Features
 -----------
-• Dual-mode Support: Run reconstructions using either VGGT or VGGT+BA
+• Dual-mode Support: Run reconstructions using either VGGT or VGGT+GA
 • Resolution Preservation: Maintains original image resolution in camera parameters and tracks
 • COLMAP Compatibility: Exports results in standard COLMAP sparse reconstruction format
 """
