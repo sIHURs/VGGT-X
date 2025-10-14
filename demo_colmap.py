@@ -103,9 +103,7 @@ def demo_fn(args):
     if os.path.exists(os.path.join(args.scene_dir, "sparse/0/images.bin")):
         print("Using order of ground truth images from COLMAP sparse reconstruction")
         images_gt = colmap_utils.read_images_binary(os.path.join(args.scene_dir, "sparse/0/images.bin"))
-
-        if args.total_frame_num > len(images_gt):
-            raise ValueError(f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}")
+        assert args.total_frame_num <= len(images_gt), f"Requested total_frame_num {args.total_frame_num} exceeds available images {len(images_gt)}"
         
         images_gt = dict(list(images_gt.items())[:args.total_frame_num])
         images_gt_keys = list(images_gt.keys())

@@ -46,7 +46,7 @@ pip install -r requirements.txt
 Now, put the image collection to path/to/your/scene/images. Please ensure that the images are stored in `/YOUR/SCENE_DIR/images/`. This folder should contain only the images. Then run the model and get COLMAP results:
 
 ```bash
-python demo_colmap.py --scene_dir /YOUR/SCENE_DIR --shared_camera --use_opt
+python demo_colmap.py --scene_dir /YOUR/SCENE_DIR --shared_camera --use_ga
 ```
 
 The reconstruction result (camera parameters and 3D points) will be automatically saved under `/YOUR/SCENE_DIR_vggt_x/sparse/` in the COLMAP format (currently only supports `PINHOLE` camera type), such as:
@@ -62,7 +62,7 @@ SCENE_DIR_vggt_x/
       └── points3D.bin
 ```
 
-Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder `/YOUR/SCENE_DIR_vggt_x/`, except for the `sparse/` folder. It minimizes additional storage usage and facilitates usage of reconstruction results. If `/YOUR/SCENE_DIR/sparse/` exists, it would take it as ground-truth and save pose and point map evaluation result to `/YOUR/SCENE_DIR_vggt_x/sparse/eval_results.txt`.
+Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder `/YOUR/SCENE_DIR_vggt_x/`, except for the `sparse/` folder. It minimizes additional storage usage and facilitates usage of reconstruction results. If `/YOUR/SCENE_DIR/sparse/` exists, it would take it as ground-truth and save pose and point map evaluation result to `/YOUR/SCENE_DIR_vggt_x/sparse/eval_results.txt`. If you have multiple scenes, don't hesitate to try our provided `colmap_parallel.sh` for parallel running and automatic metrics gathering.
 
 ## 🔍 Detailed Usage
 
@@ -113,36 +113,10 @@ Note that `-i` and `-r` are optional. Set them when you want to show image along
 </details>
 
 
-## Integration with Gaussian Splatting
+## 💕 Integration with Gaussian Splatting
 
 
-The exported COLMAP files can be directly used with [gsplat](https://github.com/nerfstudio-project/gsplat) for Gaussian Splatting training. Install `gsplat` following their official instructions (we recommend `gsplat==1.3.0`):
-
-An example command to train the model is:
-```
-cd gsplat
-python examples/simple_trainer.py  default --data_factor 1 --data_dir /YOUR/SCENE_DIR/ --result_dir /YOUR/RESULT_DIR/
-```
-
-
-## Runtime and GPU Memory
-
-We benchmark the runtime and GPU memory usage of VGGT's aggregator on a single NVIDIA H100 GPU across various input sizes. 
-
-| **Input Frames** | 1 | 2 | 4 | 8 | 10 | 20 | 50 | 100 | 200 |
-|:----------------:|:-:|:-:|:-:|:-:|:--:|:--:|:--:|:---:|:---:|
-| **Time (s)**     | 0.04 | 0.05 | 0.07 | 0.11 | 0.14 | 0.31 | 1.04 | 3.12 | 8.75 |
-| **Memory (GB)**  | 1.88 | 2.07 | 2.45 | 3.23 | 3.63 | 5.58 | 11.41 | 21.15 | 40.63 |
-
-Note that these results were obtained using Flash Attention 3, which is faster than the default Flash Attention 2 implementation while maintaining almost the same memory usage. Feel free to compile Flash Attention 3 from source to get better performance.
-
-
-## Acknowledgements
-
-Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookresearch/PoseDiffusion), [VGGSfM](https://github.com/facebookresearch/vggsfm), [CoTracker](https://github.com/facebookresearch/co-tracker), [DINOv2](https://github.com/facebookresearch/dinov2), [Dust3r](https://github.com/naver/dust3r), [Moge](https://github.com/microsoft/moge), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [Sky Segmentation](https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), [Metric3D](https://github.com/YvanYin/Metric3D) and many other inspiring works in the community.
-
-## License
-See the [LICENSE](./LICENSE.txt) file for details about the license under which this code is made available.
+The exported COLMAP files can be directly used with [CityGaussian](https://github.com/Linketic/CityGaussian) for Gaussian Splatting training. This repo is based on [Gaussian Lightning](https://github.com/yzslab/gaussian-splatting-lightning) and supports various baselines such as MipSplatting and MCMC-3DGS. The guidance for joint pose and 3DGS optimization has also been incorporated in our repo.
 
 ## 🤗 Citation
 If you find this repository useful for your research, please use the following BibTeX entry for citation.
@@ -156,3 +130,12 @@ If you find this repository useful for your research, please use the following B
           primaryClass={cs.CV},
           url={https://arxiv.org/abs/2509.25191}, 
     }
+
+## Acknowledgements
+
+This repo benefits from [VGGT](https://github.com/facebookresearch/vggt), [VGGT-Low-Ram](https://github.com/harry7557558/vggt-low-vram), [MASt3R](https://github.com/naver/mast3r), [PoseDiffusion](https://github.com/facebookresearch/PoseDiffusion), [3RGS](https://github.com/zsh523/3rgs) and many other inspiring works in the community. Thanks for their great work!
+
+
+## License
+See the [LICENSE](./LICENSE.txt) file for details about the license under which this code is made available.
+
