@@ -110,9 +110,12 @@ Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder 
   ```
 
   #### CO3Dv2
-  Following [CF-3DGS](https://github.com/NVlabs/CF-3DGS) and [HT-3DGS](https://github.com/jibo27/3DGS_Hierarchical_Training), we select 5 scenes from CO3Dv2. The images can be downloaded from [here](https://www.dropbox.com/scl/fi/6lseati34ch9bx1z67ztu/co3d.zip?rlkey=76ssy7p4c4y8pug94b7z62q3e&st=n554skm5&dl=0), and the COLMAP sparse reconstruction results can be downloaded from:
-  - Google Drive: https://drive.google.com/file/d/1a0rYyyErzbOofVxwzZ5JSjakeFH4S13o/view?usp=sharing
-  - Baidu Netdisk: https://pan.baidu.com/s/1X0NB8ZsgpmN7izcEguSeWA?pwd=41pt
+  Following [CF-3DGS](https://github.com/NVlabs/CF-3DGS) and [HT-3DGS](https://github.com/jibo27/3DGS_Hierarchical_Training), we select 5 scenes from CO3Dv2. It can be downloaded from [here](https://pan.baidu.com/s/1_VjuFG7D4cFMSJlnGOy5PQ?pwd=fbwp).
+  Then run:
+  ```bash
+  cd data
+  unzip CO3Dv2.zip
+  ```
 
 </details>
 
