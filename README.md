@@ -67,7 +67,7 @@ Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder 
 ## 🔍 Detailed Usage
 
 <details>
-<summary>Click to expand</summary>
+<summary>Script Parameters</summary>
 
   #### --post_fix
   Post fix for the output folder (`_vggt_x` by default). You can set any desired name for the output folder.
@@ -89,6 +89,32 @@ Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder 
   If specified, it would use shared camera for all images.
 </details>
 
+<details>
+<summary>NVS Dataset Preparation</summary>
+
+  #### MipNeRF360
+  For novel view synthesis on MipNeRF360, please download the `360_v2.zip` and `360_extra_scenes.zip` from [MipNeRF360](https://jonbarron.info/mipnerf360/).
+
+  ```bash
+  cd data
+  mkdir MipNeRF360
+  unzip 360_v2.zip -d MipNeRF360
+  unzip 360_extra_scenes.zip -d MipNeRF360
+  ```
+  #### Tanks and Temple (TnT)
+  For reconstruction on TnT dataset, please download the preprocessed [TnT_data](https://huggingface.co/datasets/ZehaoYu/gaussian-opacity-fields/tree/main). More details can be found [here](https://github.com/YuxueYang1204/TrimGS).
+
+  ```bash
+  cd data
+  unzip TNT_GOF.zip
+  ```
+
+  #### CO3Dv2
+  Following [CF-3DGS](https://github.com/NVlabs/CF-3DGS) and [HT-3DGS](https://github.com/jibo27/3DGS_Hierarchical_Training), we select 5 scenes from CO3Dv2. The images can be downloaded from [here](https://www.dropbox.com/scl/fi/6lseati34ch9bx1z67ztu/co3d.zip?rlkey=76ssy7p4c4y8pug94b7z62q3e&st=n554skm5&dl=0), and the COLMAP sparse reconstruction results can be downloaded from:
+  - Google Drive: https://drive.google.com/file/d/1a0rYyyErzbOofVxwzZ5JSjakeFH4S13o/view?usp=sharing
+  - Baidu Netdisk: https://pan.baidu.com/s/1X0NB8ZsgpmN7izcEguSeWA?pwd=41pt
+
+</details>
 
 ## 💻 Viser 3D Viewer
 
