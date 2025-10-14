@@ -260,19 +260,7 @@ class DPTHead(nn.Module):
         if self.feature_only:
             return out.view(B, S, *out.shape[1:])
 
-        # out = self.scratch.output_conv2(out)
-        # out = self.scratch.output_conv2.float()(out.float())
-        # out = self.scratch.output_conv2.half()(out.half())
-        # out = self.scratch.output_conv2[-1].float()(self.scratch.output_conv2[:2](out).float())
-
-        out1 = torch.empty((out.shape[0], self.output_dim, *out.shape[2:]),
-                           dtype=torch.float32, device=out.device).contiguous()
-        mini_batch = 4
-        for i0 in range(0, out.shape[0], mini_batch):
-            i1 = min(i0 + mini_batch, out.shape[0])
-            out1[i0:i1] = self.scratch.output_conv2(out[i0:i1].float().contiguous())
-        out = out1
-        # torch.cuda.empty_cache()
+        out = self.scratch.output_conv2(out.float().contiguous())
 
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
 
