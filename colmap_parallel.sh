@@ -5,7 +5,7 @@ get_available_gpu() {
   '
 }
 
-dir="data/MipNeRF360"  # replace with your dataset path
+dir="data/MipNeRF360"  # replace with your dataset path, such as "data/TNT_GOF/TrainingSet" or "data/CO3Dv2"
 post_fix="_vggt_x"  # replace with your desired postfix for output directories
 
 # List of scene directories if you want to run specific scenes

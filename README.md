@@ -20,6 +20,8 @@
 
 
 ## 📰 News
+**[2025.10.]** Code of VGGT-X had been released!
+
 **[2025.09.30]** Paper release of our VGGT-X on arXiv!
 
 
@@ -116,6 +118,8 @@ Note that it would soft link everything in `/YOUR/SCENE_DIR/` to the new folder 
   cd data
   unzip CO3Dv2.zip
   ```
+
+  With dataset prepared, you can replace the `$dir` in `colmap_parallel.sh` to your dataset directory and run it to efficiently get inferenced 3D key attributes in COLMAP format. The results can be directly applied integrated for joint pose and 3DGS reconstruction.
 
 </details>
 
