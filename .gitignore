@@ -146,6 +146,8 @@ skyseg.onnx
 
 # pixi environments
 .pixi
+
+# others
 *.egg-info
 .history
 .gradio
