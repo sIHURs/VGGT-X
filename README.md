@@ -38,7 +38,7 @@
 First, clone this repository to your local machine, and install the dependencies. 
 
 ```bash
-git clone https://github.com/Linketic/VGGT-X.git 
+git clone --recursive https://github.com/Linketic/VGGT-X.git 
 cd VGGT-X
 conda create -n vggt_x python=3.10
 conda activate vggt_x
