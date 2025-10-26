@@ -20,7 +20,7 @@
 
 
 ## 📰 News
-**[2025.10.]** Code of VGGT-X had been released!
+**[2025.10.26]** Code of VGGT-X had been released!
 
 **[2025.09.30]** Paper release of our VGGT-X on arXiv!
 
