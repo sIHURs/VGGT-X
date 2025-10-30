@@ -11,6 +11,37 @@ import os
 import torch
 import torch.nn.functional as F
 
+# disable triton if arch not support
+def is_pascal():
+    if not torch.cuda.is_available():
+        print("❌ No CUDA device available.")
+        return False
+    major, minor = torch.cuda.get_device_capability()
+    print(f"🔍 CUDA Capability: {major}.{minor}")
+    return major == 6  # Pascal = 6.x
+
+if is_pascal():
+    print("✅ Detected Pascal GPU — disabling advanced features...")
+    os.environ["TORCHINDUCTOR_DISABLE"] = "1"
+    os.environ["TORCH_COMPILE_DISABLE"] = "1"
+    os.environ["TORCHDYNAMO_DISABLE"] = "1"
+    os.environ["TRITON_DISABLE"] = "1"
+    os.environ["TORCH_CUDA_FUSER_DISABLE"] = "1"
+else:
+    print("🚀 Non-Pascal GPU — using optimized TorchInductor if available.")
+
+
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
+# disable triton check
+try:
+    torch._inductor
+    print("⚙️ TorchInductor on")
+except AttributeError:
+    print("✅ TorchInductor off")
+
+print("Device capability:", torch.cuda.get_device_capability())
+
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
@@ -60,10 +91,10 @@ def run_VGGT(images, device, dtype, chunk_size):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
-    parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--scene_dir", type=str, default="data/MAD_Scene", help="Directory containing the scene images")
     parser.add_argument("--post_fix", type=str, default="_vggt_x", help="Post fix for the output folder")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--use_ga", action="store_true", default=False, help="Whether to apply global alignment for better reconstruction")
+    parser.add_argument("--use_ga", action="store_true", default=True, help="Whether to apply global alignment for better reconstruction")
     parser.add_argument("--save_depth", action="store_true", default=False, help="If save depth")
     parser.add_argument("--chunk_size", type=int, default=256, help="Chunk size for frame-wise operation in VGGT")
     parser.add_argument("--total_frame_num", type=int, default=None, help="Number of frames to reconstruct")
